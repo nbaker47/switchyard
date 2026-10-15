@@ -22,6 +22,7 @@ STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "switchyard"
 PRICES = json.loads((HERE / "prices.json").read_text())
 FIELDS = ("input", "output", "cache_read", "cache_write")
+CACHE_VERSION = 2
 
 
 def price_of(model):
@@ -67,15 +68,23 @@ def _iso_to_ts(s):
 class Ledger:
     def __init__(self, session_id, transcript_path):
         self.sid = session_id
+        if not transcript_path:  # older log lines did not record it
+            found = glob.glob(str(Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+                                  / "projects" / "*" / f"{session_id}.jsonl"))
+            transcript_path = found[0] if found else None
         self.transcript = Path(transcript_path) if transcript_path else None
         self.cache_file = CACHE / f"ledger-{session_id}.json"
         self.s = self._load()
 
     def _load(self):
         try:
-            return json.loads(self.cache_file.read_text())
+            state = json.loads(self.cache_file.read_text())
+            if state.get("v") == CACHE_VERSION:
+                return state
         except (OSError, ValueError):
-            return {"offsets": {}, "seen": {}, "main": {}, "agents": {}, "spawns": {}}
+            pass
+        return {"v": CACHE_VERSION, "offsets": {}, "seen": {}, "main": {}, "agents": {},
+                "spawns": {}, "daily": {}}
 
     def _save(self):
         CACHE.mkdir(parents=True, exist_ok=True)
@@ -105,7 +114,8 @@ class Ledger:
                 continue
 
     def _count(self, path, bucket):
-        seen = set(self.s["seen"].get(str(path), []))
+        recent = self.s["seen"].get(str(path), [])  # in order, so trimming keeps the newest
+        seen = set(recent)
         for d in self._read_new(path):
             m = d.get("message") if isinstance(d.get("message"), dict) else {}
             if d.get("type") == "assistant":
@@ -125,10 +135,14 @@ class Ledger:
             if key in seen:
                 continue
             seen.add(key)
+            recent.append(key)
             c = bucket.setdefault(model, dict.fromkeys(FIELDS, 0))
+            day = self.s["daily"].setdefault((d.get("timestamp") or "")[:10] or "unknown", {})
+            dc = day.setdefault(f"Claude|{model}", dict.fromkeys(FIELDS, 0))
             for f, v in _usage(u).items():
                 c[f] += v
-        self.s["seen"][str(path)] = list(seen)[-500:]
+                dc[f] += v
+        self.s["seen"][str(path)] = recent[-500:]
 
     def refresh(self):
         if self.transcript and self.transcript.exists():
