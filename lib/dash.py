@@ -1,24 +1,66 @@
-"""Live dashboard for a cr session: routing feed, tokens per provider, saving vs all-Opus.
+"""Live dashboard for a cr session: requests feed, provider limits, saving from routing.
 
-    cr dash [--session ID] [--once] [--interval 2]
+    cr dash [--session ID] [--once] [--interval 2] [--width N] [--height N]
 
 Run it in a split pane next to `cr`. Without --session it follows whichever cr session
-most recently received a prompt.
+most recently received a prompt. Narrow panes (under 100 columns) stack everything in one
+column; wide terminals put the feed on the left and limits and savings on the right.
+Press q or Ctrl+C to quit.
 """
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import quota  # noqa: E402
 from ledger import CACHE, Ledger, latest_session, short  # noqa: E402
 
 B, DIM, CYAN, GREEN, YELLOW, RED, MAGENTA, R = ("\033[1m", "\033[2m", "\033[36m", "\033[32m",
-                                                "\033[33m", "\033[31m", "\033[35m", "\033[0m")
+                                                 "\033[33m", "\033[31m", "\033[35m", "\033[0m")
 PROVIDER_COLOR = {"Claude": YELLOW, "Antigravity": MAGENTA}
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+WIDE = 100  # columns at which the layout switches from stacked to side by side
+
+
+# ---- text helpers: every line is measured with ANSI stripped and clipped to the width ----
+
+def vlen(s):
+    return len(ANSI.sub("", s))
+
+
+def clip(s, w):
+    """Truncate s to w visible columns, keeping colour codes intact."""
+    if w <= 0:
+        return ""
+    if vlen(s) <= w:
+        return s
+    out, n, i = [], 0, 0
+    while i < len(s) and n < w:
+        m = ANSI.match(s, i)
+        if m:
+            out.append(m.group())
+            i = m.end()
+        else:
+            out.append(s[i])
+            n += 1
+            i += 1
+    return "".join(out) + R
+
+
+def pad(s, w):
+    s = clip(s, w)
+    return s + " " * (w - vlen(s))
+
+
+def flat(s, w):
+    """One line of plain text, cut with an ellipsis if longer than w."""
+    s = " ".join(str(s or "").split())
+    return s if len(s) <= w else (s[:max(0, w - 1)] + "…" if w > 0 else "")
 
 
 def k(n):
@@ -26,76 +68,215 @@ def k(n):
 
 
 def bar(frac, width, color):
+    width = max(0, width)
     n = max(0, min(width, round(width * frac)))
     return f"{color}{'█' * n}{R}{DIM}{'░' * (width - n)}{R}"
 
 
-def render(sid, transcript, width):
+def heat(pct):
+    return GREEN if pct < 60 else YELLOW if pct < 85 else RED
+
+
+def until(ts, now):
+    """Time until ts as 2h13m / 45m / 3d4h, or '' if unknown or past."""
+    if not isinstance(ts, (int, float)) or ts <= now:
+        return ""
+    s = int(ts - now)
+    d, h, m = s // 86400, s % 86400 // 3600, s % 3600 // 60
+    return f"{d}d{h}h" if d else f"{h}h{m:02d}m" if h else f"{m}m"
+
+
+def header(w, text):
+    return f"{B}{text}{R} {DIM}{'─' * max(0, w - len(text) - 1)}{R}"
+
+
+# ---- sections ----
+
+def route_color(route, provider=""):
+    """Colour by route type: agy/Antigravity magenta, front desk (self) yellow, other subagents green."""
+    r = (route or "").lower()
+    if "agy" in r or provider == "Antigravity":
+        return MAGENTA
+    if r in ("self", "", "opus"):
+        return YELLOW
+    return GREEN
+
+
+def feed_rows(requests, fw, rows, now):
+    """Newest request last (a log tail). Columns are added as the feed gets wider."""
+    cols_time = 8 if fw >= 56 else 5
+    rw = 7 if fw < 56 else 10 if fw < 100 else 18
+    mw = 0 if fw < 70 else 12 if fw < 120 else 22
+    sw = 1 if fw < 70 else 6
+    extra = fw >= 90
+    fixed = cols_time + 1 + rw + 1 + (mw + 1 if mw else 0) + sw + 1 + (17 if extra else 0)
+    dw = max(6, fw - fixed)
+    out = []
+    for r in requests[-rows:] if rows > 0 else []:
+        t = time.strftime("%H:%M:%S" if cols_time == 8 else "%H:%M", time.localtime(r["ts"])) \
+            if r.get("ts") else "-" * cols_time
+        hand = r.get("handoffs") or []
+        route = r.get("route") or "self"
+        prov = hand[0].get("provider") if hand else "Claude"
+        col = route_color(hand[0].get("route") if hand else "self", prov)
+        models = [short(h["model"]) if "/" not in str(h.get("model")) else h["model"] for h in hand if h.get("model")]
+        model = ", ".join(dict.fromkeys(models)) or ", ".join((r.get("desk") or {}).get("models") or []) or "-"
+        live = now - (r.get("end") or r["ts"]) < 30
+        done = r.get("tokens", 0) > 0
+        st = ("●" if live else "✓" if done else "·")
+        st_txt = {"●": "live", "✓": "done", "·": "wait"}[st]
+        stc = CYAN if live else GREEN if done else DIM
+        status = f"{stc}{st}{R}" if sw == 1 else f"{stc}{st} {st_txt}{R}"
+        line = f"{DIM}{t}{R} {col}{pad(flat(route, rw), rw)}{R} "
+        if mw:
+            line += f"{pad(flat(model, mw), mw)} "
+        line += f"{pad(status, sw)} "
+        if extra:
+            sv = f"{r['saved_pct']:.0f}%" if r.get("opus") else ""
+            line += f"{k(r.get('tokens', 0)):>7} {DIM}{sv:>4}{R}{' ' * 4}"
+        line += flat(r.get("prompt"), dw)
+        out.append(line)
+    return out
+
+
+def limits_lines(w, status, summary, now):
+    """One bar per window per plugged-in provider, plus saver mode."""
+    q = quota.latest() or (status.get("rate_limits") or {})
+    lines = []
+    active, pct = quota.saver(q if q else None) if q else (False, None)
+    on = f"{RED}{B}ON{R}" if active else f"{DIM}OFF{R}"
+    lines.append(f"{B}Claude{R} {DIM}saver{R} {on}" + (f" {DIM}(at {quota.SAVER_AT:.0f}%){R}" if w >= 40 else ""))
+    wins = [("5h", "five_hour"), ("7d", "seven_day")]
+    shown = False
+    for name, key in wins:
+        win = q.get(key) or {}
+        v = win.get("used_percentage")
+        if not isinstance(v, (int, float)):
+            continue
+        shown = True
+        rs = until(win.get("resets_at"), now)
+        tail = f" {v:>3.0f}%" + (f" {rs:>6}" if rs else "")
+        bw = max(4, w - 4 - len(tail) - 2)
+        mark = f" {RED}!{R}" if v >= 85 else ""
+        lines.append(f" {DIM}{name}{R} {bar(v / 100, bw, heat(v))}{heat(v)}{tail}{R}{mark}")
+    if not shown:
+        lines.append(f" {DIM}no limit data yet{R}")
+    by = summary["by"]
+    provs = list(dict.fromkeys(["Antigravity"] + [key.split("|", 1)[0] for key in by if not key.startswith("Claude|")]))
+    for prov in provs:
+        tok = sum(sum(c.values()) for key, c in by.items() if key.split("|", 1)[0] == prov)
+        # agy does not expose a quota; show what this session has used instead.
+        lines.append(f"{PROVIDER_COLOR.get(prov, CYAN)}{B}{prov}{R} {DIM}no limit data{R} "
+                     f"{k(tok)} tok this session")
+    return lines
+
+
+def saved_lines(w, s):
+    """Saving from routing vs running every token on the top model (Opus).
+
+    Assumption: baseline is what the tokens actually processed (front desk, subagents, agy)
+    would have cost on the top model at prices.json weights, from ledger.summary(); the
+    plan-percentage view is that same ratio. Context kept out by hand-offs is not credited.
+    """
+    if not s["baseline"]:
+        return [f"{DIM}No tokens yet.{R}"]
+    bw = max(4, w - 11 - 8)
+    top = sum(sum(c.values()) for key, c in s["by"].items() if "opus" in key.lower())
+    total = sum(sum(c.values()) for c in s["by"].values()) or 1
+    return [f"  {DIM}all-Opus{R} {bar(1, bw, DIM)} ${s['baseline']:.2f}",
+            f"  {DIM}routed  {R} {bar(s['actual'] / s['baseline'], bw, GREEN)} ${s['actual']:.2f}",
+            f"  {GREEN}{B}saved {s['saved_pct']:.0f}%{R} {GREEN}${s['saved']:.2f}{R}"
+            f"  {DIM}{100 * (total - top) / total:.0f}% of tokens off Opus{R}"]
+
+
+def tokens_lines(w, s, rows):
+    by = sorted(((key.split("|", 1), sum(c.values())) for key, c in s["by"].items()), key=lambda r: -r[1])
+    top = max((t for _, t in by), default=0) or 1
+    out = []
+    for (prov, model), t in by[:max(0, rows)]:
+        m = flat(short(model) if "/" not in model else model, 14)
+        bw = max(4, w - 12 - 14 - 8)
+        out.append(f"{PROVIDER_COLOR.get(prov, CYAN)}{prov[:11]:<11}{R} {m:<14} "
+                   f"{bar(t / top, bw, PROVIDER_COLOR.get(prov, CYAN))} {k(t):>6}")
+    return out
+
+
+def render(sid, transcript, width, height=40):
+    width, height = max(1, width), max(1, height)
+    now = time.time()
     s = Ledger(sid, transcript).refresh().summary()
     try:
         status = json.loads((CACHE / f"status-{sid}.json").read_text())
     except (OSError, ValueError):
         status = {}
-    w = max(40, min(width, 110))
     cwd = status.get("cwd") or next((p.get("cwd") for p in reversed(Ledger(sid, None).prompts())), "")
-    out = [f"{B}{CYAN}⇄ switchyard{R}  {DIM}session {sid[:8]}  {cwd or ''}{R}", ""]
+    head = f"{B}{CYAN}⇄ switchyard{R}  {DIM}{sid[:8]}  {cwd or ''}{R}"
+    reqs = s["requests"]
+    body = max(1, height - 2)  # header line, and keep the last row free so nothing scrolls
 
-    # Saving vs all-Opus
-    bw = w - 34
-    if s["baseline"]:
-        out.append(f"{B}Cost vs an all-Opus session{R} {DIM}(API prices as weights){R}")
-        out.append(f"  all-Opus   {bar(1, bw, DIM)} ${s['baseline']:.2f}")
-        out.append(f"  this run   {bar(s['actual'] / s['baseline'], bw, GREEN)} ${s['actual']:.2f}")
-        out.append(f"  {GREEN}{B}saved {s['saved_pct']:.0f}%{R}  (${s['saved']:.2f}). Conservative: "
-                   f"it ignores the context that hand-offs kept small.")
+    if width >= WIDE:
+        rw = 62 if width >= 160 else 50
+        lw = width - rw - 3
+        right = [header(rw, "Limits")] + limits_lines(rw, status, s, now) + [""]
+        right += [header(rw, "Saved by routing")] + saved_lines(rw, s) + [""]
+        right += [header(rw, "Tokens")] + tokens_lines(rw, s, body - len(right) - 1)
+        left = [header(lw, "Requests")]
+        feed = feed_rows(reqs, lw, body - 1, now)
+        left += [""] * (body - 1 - len(feed)) + feed
+        right += [""] * (body - len(right))
+        lines = [pad(head, width)] + [f"{pad(a, lw)} {DIM}│{R} {pad(b, rw)}"
+                                      for a, b in zip(left, right)]
     else:
-        out.append(f"{DIM}No tokens yet.{R}")
-    out.append("")
+        panels = [header(width, "Limits")] + limits_lines(width, status, s, now)
+        panels += [header(width, "Saved by routing")] + saved_lines(width, s)
+        feed_h = body - 1 - len(panels)
+        if feed_h < 3:  # too short for everything: keep the feed, drop panels from the bottom
+            panels = panels[:max(0, body - 1 - 3)]
+            feed_h = body - 1 - len(panels)
+        feed = feed_rows(reqs, width, feed_h, now)
+        if not reqs:
+            feed = [f"{DIM}Waiting for the first prompt…{R}"]
+        lines = [head, header(width, "Requests")] + [""] * (feed_h - len(feed)) + feed + panels
+    return "\n".join(clip(ln, width) for ln in lines[:height])
 
-    # Quota and context
-    rl = status.get("rate_limits") or {}
-    q = []
-    for name, key in (("5-hour", "five_hour"), ("7-day", "seven_day")):
-        v = (rl.get(key) or {}).get("used_percentage")
-        if isinstance(v, (int, float)):
-            color = GREEN if v < 60 else YELLOW if v < 85 else RED
-            q.append(f"{name} {bar(v / 100, 12, color)} {v:.0f}%")
-    cu = (status.get("context_window") or {}).get("current_usage") or {}
-    ctx = sum(cu.get(f) or 0 for f in ("input_tokens", "cache_read_input_tokens",
-                                       "cache_creation_input_tokens"))
-    if q or ctx:
-        out.append(f"{B}Claude plan{R}  " + "   ".join(q) + (f"   context {k(ctx)}" if ctx else ""))
-        out.append("")
 
-    # Tokens per provider and model
-    out.append(f"{B}Tokens by provider and model{R}")
-    rows = sorted(((key.split("|", 1), sum(c.values())) for key, c in s["by"].items()),
-                  key=lambda r: -r[1])
-    top = max((t for _, t in rows), default=0) or 1
-    for (prov, model), t in rows:
-        out.append(f"  {PROVIDER_COLOR.get(prov, '')}{prov:<11}{R} {model[:26]:<26} "
-                   f"{bar(t / top, w - 52, PROVIDER_COLOR.get(prov, CYAN))} {k(t):>7}")
-    if not rows:
-        out.append(f"  {DIM}(none yet){R}")
-    out.append("")
+# ---- terminal loop ----
 
-    # Feed
-    out.append(f"{B}Routing feed{R}")
-    feed = s["feed"][-14:]
-    if not feed:
-        out.append(f"  {DIM}Waiting for the first prompt in a cr session…{R}")
-    for e in feed:
-        t = time.strftime("%H:%M:%S", time.localtime(e["ts"])) if e["ts"] else "--:--:--"
-        if e["kind"] == "prompt":
-            out.append(f"  {DIM}{t}{R}  {CYAN}▸ request{R}  {e['desc'][:w - 44]!r:.{w - 40}}  "
-                       (f"{DIM}hint {e['route']}{R}" if e.get("route") else ""))
-        else:
-            color = PROVIDER_COLOR.get(e["provider"], "")
-            saved = f"saved ${e['opus'] - e['cost']:.2f}" if e["opus"] else ""
-            out.append(f"  {DIM}{t}{R}  {color}→ {e['route'].split(':')[-1]:<8}{R} "
-                       f"{short(e['model']) if '/' not in e['model'] else e['model']:<14} "
-                       f"{color}{e['provider']:<11}{R} {k(e['tokens']):>7} tok  {DIM}{saved}{R}")
-    return "\n".join(out)
+def _screen(a, cols, rows):
+    sid, transcript = (a.session, None) if a.session else latest_session()
+    if a.session:
+        try:
+            for line in reversed((Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+                                  / "switchyard/routes.jsonl").read_text().splitlines()):
+                if a.session in line:
+                    transcript = json.loads(line).get("transcript")
+                    break
+        except (OSError, ValueError):
+            pass
+    if not sid:
+        return "\n".join(clip(x, cols) for x in
+                         (f"{CYAN}⇄ switchyard{R}", "", "No cr session yet. Start one with `cr` in another pane."))
+    try:
+        return render(sid, transcript, cols, rows)
+    except Exception as e:  # never kill the dashboard over one bad refresh
+        return clip(f"{RED}dash error: {type(e).__name__}: {e}{R}", cols)
+
+
+def _key_pressed(timeout):
+    """True if q was typed within timeout seconds; plain sleep when stdin is not a terminal."""
+    if not sys.stdin.isatty():
+        time.sleep(timeout)
+        return False
+    import select
+    end = time.time() + timeout
+    while True:
+        left = end - time.time()
+        if left <= 0:
+            return False
+        if select.select([sys.stdin], [], [], left)[0]:
+            ch = os.read(sys.stdin.fileno(), 32)
+            if b"q" in ch.lower() or ch == b"":
+                return True
 
 
 def main(argv=None):
@@ -103,27 +284,41 @@ def main(argv=None):
     p.add_argument("--session")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=float, default=2.0)
+    p.add_argument("--width", type=int, help="override terminal width (for testing)")
+    p.add_argument("--height", type=int, help="override terminal height (for testing)")
     a = p.parse_args(argv)
+
+    def size():
+        t = shutil.get_terminal_size((100, 30))
+        return a.width or t.columns, a.height or t.lines
+
+    if a.once:
+        print(_screen(a, *size()))
+        return 0
+    old = None
     try:
+        if sys.stdin.isatty():
+            import termios
+            import tty
+            old = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+        sys.stdout.write("\033[?25l\033[2J")  # hide cursor, clear once
         while True:
-            sid, transcript = (a.session, None) if a.session else latest_session()
-            if a.session:
-                for line in reversed((Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-                                      / "switchyard/routes.jsonl").read_text().splitlines()):
-                    if a.session in line:
-                        transcript = json.loads(line).get("transcript")
-                        break
-            cols = shutil.get_terminal_size((100, 40)).columns
-            screen = render(sid, transcript, cols) if sid else \
-                f"{CYAN}⇄ switchyard{R}\n\nNo cr session yet. Start one with `cr` in another pane."
-            if a.once:
-                print(screen)
-                return 0
-            sys.stdout.write("\033[H\033[2J" + screen + "\n")
+            cols, rows = size()  # re-read each refresh so resizing works
+            screen = _screen(a, cols, rows)
+            # cursor home, clear each line's tail, then everything below: no full-clear flicker
+            sys.stdout.write("\033[H" + "\033[K\n".join(screen.split("\n")) + "\033[K\033[J")
             sys.stdout.flush()
-            time.sleep(a.interval)
+            if _key_pressed(a.interval):
+                return 0
     except KeyboardInterrupt:
         return 0
+    finally:
+        if old is not None:
+            import termios
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+        sys.stdout.write("\033[?25h\033[0m\n")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":
