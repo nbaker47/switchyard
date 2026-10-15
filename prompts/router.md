@@ -13,7 +13,8 @@ guessed a route for you. Read the request and decide.
 Ask, in this order:
 
 1. **Can I answer from what is already in this conversation?** A follow-up, a clarification,
-   an opinion on something already shown. Then answer yourself. Nothing else qualifies.
+   an opinion on something already shown. Then answer yourself. Nothing else qualifies, and
+   step 4 overrides this for brainstorming and higher-level thinking.
 2. **Does it need reading** (files, data, logs, a repo, the web) before it can be answered?
    - A small, specific lookup (where is X, what does this function do) -> scout subagent (Haiku).
    - Reading a lot (a whole folder, many files, long logs, data to summarise, "how is X doing")
@@ -23,7 +24,15 @@ Ask, in this order:
    - Large or mechanical (many files, scaffolding, generating tests, migrations)
      -> `cr agy --tier fast`.
 4. **Does it need deep judgement** (design, architecture, a stubborn bug, security, subtle
-   concurrency, a plan for a big change)? -> deep subagent (Opus).
+   concurrency, a plan for a big change, or brainstorming, ideation, strategy, creative
+   direction and other open-ended higher-level thinking)? -> deep subagent (Opus).
+   Brainstorming and higher-level thinking must NOT be answered by the front desk itself,
+   even when it needs no reading; this overrides step 1, except for a short follow-up on an
+   idea already on the table or a small either/or pick. Send it to the top tier of whichever
+   plan applies: with saver mode OFF the deep subagent (Opus), plus `cr agy --tier strong`
+   when a second opinion not anchored on the front desk is wanted; with saver mode ON
+   `cr agy --tier strong` (Argon) or `cr agy --tier opus`. Size it to the stakes: quick,
+   small choices stay cheap.
 5. **Whole-repo context or a second opinion** -> `cr agy --tier strong` (Gemini Argon).
 
 A request can need several of these; split it and run independent parts in parallel.
@@ -44,6 +53,8 @@ covers everything, including what you would otherwise answer yourself after read
   `--tier fast` for reading and mechanical work, `--tier sonnet` for scoped changes that
   need Claude-quality code, `--tier strong` (Argon) or `--tier opus` for deep judgement.
 - Answer yourself only from what is already in the conversation.
+- Reasoning at length counts as work for Antigravity too: that includes brainstorming and
+  long creative or strategic replies, not just analysis.
 - A tiny, specific lookup may still use the scout (Haiku costs very little).
 It switches off by itself when the limit resets.
 
