@@ -163,7 +163,13 @@ def main(argv=None):
     if dropped:
         print("  (note: backgrounding is set on the tool call that runs cr agy; flag ignored)",
               file=sys.stderr)
-    a = p.parse_args(argv)
+    # A hand-off must not die over a stray argument a model added ("---", an unknown flag):
+    # drop flag-like leftovers with a note, and keep any other words as part of the task.
+    a, extra = p.parse_known_args(argv)
+    junk = [x for x in extra if x.startswith("-")]
+    a.task += [x for x in extra if not x.startswith("-")]
+    if junk:
+        print(f"  (note: ignored unknown arguments: {' '.join(junk)})", file=sys.stderr)
 
     models = list_models(a.refresh)
     if a.list:

@@ -105,6 +105,13 @@ class Tiers(unittest.TestCase):
         for argv, want in cases:
             self.assertEqual(agy.strip_background(argv)[0], want, argv)
 
+    def test_stray_arguments_do_not_kill_the_hand_off(self):
+        seen = {}
+        agy.list_models = lambda refresh=False: ["gemini-3.8-flash-low"]
+        agy.run = lambda task, model, *a, **k: seen.update(task=task, model=model) or {"status": "SUCCESS"}
+        self.assertEqual(agy.main(["--tier", "cheap", "---", "--weird-flag", "brainstorm", "this"]), 0)
+        self.assertEqual(seen, {"task": "brainstorm this", "model": "gemini-3.8-flash-low"})
+
     def test_unknown_tier_fails_clearly(self):
         with self.assertRaises(SystemExit):
             agy.pick("opus", ["gemini-3.8-flash-low"])
