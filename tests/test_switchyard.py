@@ -67,8 +67,26 @@ class Context(unittest.TestCase):
     def test_nudges_only_when_large(self):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
             f.write(json.dumps({"message": {"usage": {"cache_read_input_tokens": 300000}}}) + "\n")
-        self.assertIn("/clear", route.advise("hello", f.name)[2])
-        self.assertNotIn("/clear", route.advise("hello", None)[2])
+        self.assertIn("/clear", route.advise("hello", f.name, (False, None))[2])
+        self.assertNotIn("/clear", route.advise("hello", None, (False, None))[2])
+
+
+class SaverMode(unittest.TestCase):
+    def test_moves_claude_heavy_routes_to_antigravity(self):
+        self.assertEqual(route.advise("why does it deadlock", None, (True, 91))[0], "agy-strong")
+        self.assertEqual(route.advise("fix the login bug", None, (True, 91))[0], "agy-sonnet")
+        self.assertEqual(route.advise("where is the config", None, (True, 91))[0], "scout")
+
+    def test_off_below_threshold(self):
+        self.assertEqual(route.advise("why does it deadlock", None, (False, 40))[0], "deep")
+
+    def test_reads_quota_and_ignores_reset_windows(self):
+        import time
+        q = {"updated": time.time(),
+             "five_hour": {"used_percentage": 95, "resets_at": time.time() - 10},
+             "seven_day": {"used_percentage": 50, "resets_at": time.time() + 999}}
+        self.assertEqual(route.quota.used(q), 50)
+        self.assertEqual(route.quota.saver({**q, "updated": 0}), (False, None))
 
 
 class Tiers(unittest.TestCase):

@@ -23,6 +23,15 @@ Also available through agy: `--tier cheap` (lowest Flash), `--tier opus` and `--
 (Claude models on the Antigravity subscription; use them for Claude-quality work when this
 subscription is near its limits). `cr models` shows what each tier resolves to.
 
+## Saver mode
+
+When a `[switchyard] Saver mode` line appears, the Claude plan is close to a limit. Move
+substantial work to the Antigravity plan: `cr agy --tier strong` (Argon) instead of the
+deep subagent, and `cr agy --tier sonnet` or `--tier fast` instead of the worker subagent.
+Keep using the scout subagent (Haiku costs little), keep your own turns short, and mention
+saver mode in the route line (`route: agy strong (gemini-4-argon-high), saver mode`).
+It switches off by itself once the plan's window resets.
+
 ## Rules
 
 - **Hand off anything that reads a lot.** File reading, searching, test output and logs

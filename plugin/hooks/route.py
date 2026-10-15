@@ -11,6 +11,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+import quota  # noqa: E402
+
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "switchyard"
 CLEAR_AT = int(os.environ.get("CR_CLEAR_AT", "120000"))
 
@@ -21,7 +24,15 @@ ROUTES = {
     "deep": "deep subagent (Opus) - hard reasoning",
     "agy-fast": "`cr agy --tier fast` (Gemini Flash) - bulk or mechanical work",
     "agy-strong": "`cr agy --tier strong` (Gemini Argon) - large-context or second opinion",
+    "agy-sonnet": "`cr agy --tier sonnet` (Claude Sonnet on the Antigravity plan) - scoped change",
 }
+
+# When the Claude plan is nearly used up, Claude-heavy routes move to the Antigravity plan.
+SAVER = {"deep": "agy-strong", "worker": "agy-sonnet"}
+
+
+def apply_saver(route, active):
+    return SAVER.get(route, route) if active else route
 
 # First match wins, so the order matters: bulk before deep before lookup before change.
 RULES = [
@@ -72,11 +83,21 @@ def context_tokens(transcript_path):
     return 0
 
 
-def advise(prompt, transcript_path):
+def advise(prompt, transcript_path, saver=None):
+    active, pct = quota.saver() if saver is None else saver
     route, why = classify(prompt)
+    if apply_saver(route, active) != route:
+        why += f", saver mode moved it from {route}"
+        route = apply_saver(route, active)
     ctx = context_tokens(transcript_path) if transcript_path else 0
     lines = [f"[switchyard] suggested route: {route} = {ROUTES[route]} ({why}). "
              f"Context so far: ~{ctx // 1000}K tokens."]
+    if active:
+        lines.append(f"[switchyard] Saver mode: the Claude plan is at {pct:.0f}% of a limit "
+                     f"(threshold {quota.SAVER_AT:.0f}%). Use the Antigravity plan for anything "
+                     "substantial: `cr agy --tier strong` instead of the deep subagent, "
+                     "`cr agy --tier sonnet` or `--tier fast` instead of the worker subagent. "
+                     "The scout subagent (Haiku) is cheap enough to keep.")
     if ctx > CLEAR_AT:
         lines.append(f"[switchyard] The context is over {CLEAR_AT // 1000}K tokens. Hand off "
                      "anything that reads a lot. If this request is unrelated to the conversation "
@@ -89,12 +110,14 @@ def dry_run(prompts):
     """`cr route "..."`: show the hint each prompt would get, and the model behind it."""
     models = {"self": "front desk (CR_FRONT_MODEL, default sonnet)", "scout": "haiku",
               "worker": "sonnet", "deep": "opus"}
+    active, pct = quota.saver()
+    if active:
+        print(f"saver mode on: Claude plan at {pct:.0f}% (threshold {quota.SAVER_AT:.0f}%)")
     for prompt in prompts:
         route, why = classify(prompt)
+        route = apply_saver(route, active)
         model = models.get(route)
         if model is None:  # an agy tier: resolve it against the live model list
-            lib = Path(__file__).resolve().parents[2] / "lib"
-            sys.path.insert(0, str(lib))
             import agy
             try:
                 model = "agy " + agy.pick(route.split("-")[1], agy.list_models())
@@ -115,7 +138,8 @@ def main():
     prompt = data.get("prompt") or ""
     if prompt.lstrip().startswith("<task-notification>"):
         return 0  # a background job reporting back, not a request from the user
-    route, ctx, text = advise(prompt, data.get("transcript_path"))
+    saver = quota.saver()
+    route, ctx, text = advise(prompt, data.get("transcript_path"), saver)
     try:
         STATE.mkdir(parents=True, exist_ok=True)
         with open(STATE / "routes.jsonl", "a") as f:
@@ -127,18 +151,20 @@ def main():
         pass
     out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}
     if os.environ.get("CR_NOTICE", "1") == "1":
-        out["systemMessage"] = notice(route, ctx)
+        out["systemMessage"] = notice(route, ctx, saver)
     print(json.dumps(out))
     return 0
 
 
-def notice(route, ctx):
+def notice(route, ctx, saver=(False, None)):
     """The one line the user sees in the TUI for each prompt."""
     target = {"self": "front desk", "scout": "Haiku · Claude", "worker": "Sonnet · Claude",
               "deep": "Opus · Claude", "agy-fast": "Gemini Flash · Antigravity",
-              "agy-strong": "Gemini Argon · Antigravity"}[route]
+              "agy-strong": "Gemini Argon · Antigravity",
+              "agy-sonnet": "Sonnet · Antigravity"}[route]
     big = "  ⚠ large, /clear if unrelated" if ctx > CLEAR_AT else ""
-    return f"⇄ reading request → route: {route} → {target}   ctx {ctx // 1000}K{big}"
+    save = f"  ⛽ saver mode (Claude plan {saver[1]:.0f}%)" if saver[0] else ""
+    return f"⇄ reading request → route: {route} → {target}   ctx {ctx // 1000}K{big}{save}"
 
 
 if __name__ == "__main__":
