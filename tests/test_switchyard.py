@@ -19,6 +19,11 @@ route = load("route", "plugin/hooks/route.py")
 agy = load("agy", "lib/agy.py")
 ledger = load("ledger", "lib/ledger.py")
 
+BROWSER_RULE = (
+    'Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude '
+    'subagent, in saver mode too, because agy has no browser and none of our hooks. If the Claude plan is too full for it, stop and tell the user instead of handing it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.'
+)
+
 MODELS = [
     "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-low",
     "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
@@ -58,6 +63,20 @@ class Facts(unittest.TestCase):
         self.assertIn("7-day limit is at 91%", text)
         self.assertIn("fast=gemini-3.8-flash-medium", text)
         self.assertIn("saver mode (7-day 91%)", route.notice(0, on))
+
+    def test_saver_mode_keeps_browser_work_off_agy(self):
+        on = {"active": True, "pct": 91, "window": "7-day", "resets": None}
+        text = route.facts(None, on, {})[1]
+        self.assertIn(BROWSER_RULE, text)
+        off = {"active": False, "pct": 40, "window": "5-hour", "resets": None}
+        self.assertNotIn(BROWSER_RULE, route.facts(None, off, {})[1])
+
+    def test_router_prompt_has_browser_rule_twice(self):
+        router = (ROOT / "prompts/router.md").read_text()
+        self.assertEqual(router.count(BROWSER_RULE), 2)
+        saver = router.split("## Saver mode")[1].split("\n## ")[0]
+        self.assertIn(BROWSER_RULE, saver)
+        self.assertLess(router.index(BROWSER_RULE), router.index("## What each model is good at"))
 
     def test_saver_off_mentions_usage_only(self):
         off = {"active": False, "pct": 40, "window": "5-hour", "resets": None}

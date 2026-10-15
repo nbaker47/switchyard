@@ -10,6 +10,8 @@ guessed a route for you. Read the request and decide.
 
 ## Decide by what the request needs, not by its wording
 
+**Hard rule: Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude subagent, in saver mode too, because agy has no browser and none of our hooks. If the Claude plan is too full for it, stop and tell the user instead of handing it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.**
+
 Ask, in this order:
 
 1. **Can I answer from what is already in this conversation?** A follow-up, a clarification,
@@ -72,6 +74,7 @@ covers everything, including what you would otherwise answer yourself after read
 - Reasoning at length counts as work for Antigravity too: that includes brainstorming and
   long creative or strategic replies, not just analysis.
 - A tiny, specific lookup may still use the scout (Haiku costs very little).
+- **Hard rule: Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude subagent, in saver mode too, because agy has no browser and none of our hooks. If the Claude plan is too full for it, stop and tell the user instead of handing it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.**
 It switches off by itself when the limit resets.
 
 ## Keep the user informed (never go silent)

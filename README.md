@@ -110,7 +110,8 @@ conversation again for the new model. So switchyard routes **tasks**, not messag
    deep judgement. The front desk only answers from what is already in the conversation, and
    a tiny lookup may still use Haiku. It switches off when the window
    resets. The usage figures come from Claude Code's status line, so they are as fresh as
-   your last `cr` session.
+   your last `cr` session. Browser work (Claude in Chrome, Google Flow, AI Studio, Meta
+   Business Suite, YouTube Studio, Buffer/TikTok, `podvid live`) never goes to agy, even in saver mode; agy has no browser.
 
 **No hard-coded model list.** agy tiers are matched by family name (flash, argon, pro, opus,
 sonnet) and compute level against what `agy models` returns for your account. Claude tiers

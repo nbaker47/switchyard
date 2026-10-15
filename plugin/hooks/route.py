@@ -61,6 +61,12 @@ def agy_tiers():
     return out
 
 
+BROWSER_RULE = (
+    'Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude '
+    'subagent, in saver mode too, because agy has no browser and none of our hooks. If the Claude plan is too full for it, stop and tell the user instead of handing it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.'
+)
+
+
 def saver_state(q=None):
     q = quota.latest() if q is None else q
     active, pct = quota.saver(q)
@@ -80,7 +86,8 @@ def facts(transcript_path, saver, tiers):
             f"{saver['pct']:.0f}% (threshold {quota.SAVER_AT:.0f}%) until {when}. Any request that "
             "needs work (reading files or data, running commands, searching, editing, reasoning "
             "at length) goes to the Antigravity plan via `cr agy`. Answer yourself only from what "
-            "is already in this conversation. A tiny lookup may still use the scout subagent.")
+            "is already in this conversation. A tiny lookup may still use the scout subagent. "
+            "HARD RULE: " + BROWSER_RULE)
     elif saver["pct"] is not None:
         lines.append(f"[switchyard] Claude plan at {saver['pct']:.0f}% of its {saver['window']} limit; "
                      "saver mode off.")
