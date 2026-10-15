@@ -33,7 +33,7 @@ cr --safe                # same, with permission prompts
 cr models                # what your agy plan offers, and what each tier resolves to
 cr agy --tier fast "..." # hand a task to agy yourself
 cr usage [--days 7]      # tokens per subscription and model, and the routes taken
-cr route "some prompt"   # preview the route and model a prompt would get (no model call)
+cr route                 # what the front desk is told right now: saver mode, quota, agy tiers
 cr dash                  # live dashboard for a side pane
 cr report --json         # everything above as JSON, for your own dashboards (versioned schema)
 ```
@@ -41,8 +41,11 @@ cr report --json         # everything above as JSON, for your own dashboards (ve
 ## Seeing the routing
 
 - **In the chat:** each prompt shows a notice such as
-  `⇄ reading request → route: scout → Haiku · Claude   ctx 45K`, and every reply ends with
-  the route that was actually taken (`route: worker (Sonnet)`).
+  `⇄ reading request · ⛽ saver mode (7-day 91%) · ctx 45K`. Before a hand-off the front
+  desk says in one line where the work is going and why. `cr agy` prints a line per step
+  while agy works, and anything long runs in the background so you can keep talking. Every
+  reply ends with the route taken and why
+  (`route: agy fast (gemini-3.8-flash-medium): needed reading the code, saver mode`).
 - **Status line:** your own status line still runs first, and switchyard adds one line below it:
   `⇄ │ last: scout → haiku · Claude │ ctx 45K │ vs all-Opus −62% ($1.20 at API prices) │ 5h 10% · 7d 89%`
 - **`cr dash`:** a live view to run next to the chat. It shows the cost against an all-Opus
@@ -64,9 +67,12 @@ conversation again for the new model. So switchyard routes **tasks**, not messag
 
 1. **A front desk.** `cr` starts `claude` on Sonnet (`CR_FRONT_MODEL` changes that). It
    answers simple things itself and hands everything else off.
-2. **A hint for each prompt.** A `UserPromptSubmit` hook sorts the prompt with keyword rules
-   (no model tokens spent). It also reads how large the conversation is and suggests
-   `/clear` when that would help.
+2. **The front desk decides; nothing guesses for it.** Sonnet reads every request anyway,
+   and it understands requests far better than keyword rules, so it picks the route by what
+   the request *needs*: answerable from the conversation, a small lookup, a lot of reading,
+   a scoped change, a large mechanical change, or deep judgement. A `UserPromptSubmit` hook
+   only adds facts it can't see itself: how full your Claude plan is (and so saver mode), the
+   conversation's size, and which agy models exist today. It costs no extra model call.
 3. **Routes:**
 
    | Route | Model | For |
@@ -83,8 +89,10 @@ conversation again for the new model. So switchyard routes **tasks**, not messag
    costs less. `cr` also sets `--autocompact 160k` (`CR_AUTOCOMPACT`).
 
 5. **Saver mode.** When your Claude plan reaches 80% of its 5-hour or 7-day limit
-   (`CR_SAVER_AT`), hard work goes to Gemini Argon and scoped changes go to Sonnet on the
-   Antigravity plan. Cheap Haiku lookups stay on Claude. It switches off when the window
+   (`CR_SAVER_AT`), any request that needs work goes to the Antigravity plan: Flash for
+   reading and mechanical work, Sonnet via agy for scoped changes, Argon or Opus via agy for
+   deep judgement. The front desk only answers from what is already in the conversation, and
+   a tiny lookup may still use Haiku. It switches off when the window
    resets. The usage figures come from Claude Code's status line, so they are as fresh as
    your last `cr` session.
 
@@ -113,7 +121,8 @@ This is our reading of the terms, not legal advice.
 ## Limits
 
 - `cr usage` shows token counts, not how much of your plan is left. Neither CLI reports that.
-- The hook's keyword rules are a hint. The front desk can and does override them.
+- Routing is the front desk's judgement, so it can misjudge; it escalates a tier when a
+  cheap route's result is wrong, and the route line tells you what it chose.
 - An agy hand-off doesn't see your Claude Code skills or run your Claude hooks. MCP
   servers you add to agy (`agy mcp add`) are available to it.
 
