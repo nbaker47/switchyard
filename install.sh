@@ -8,9 +8,5 @@ chmod +x "$ROOT/bin/cr"
 ln -sf "$ROOT/bin/cr" "$BIN/cr"
 echo "linked $BIN/cr -> $ROOT/bin/cr"
 command -v claude >/dev/null || echo "  ! claude not found - install Claude Code first"
-if command -v agy >/dev/null; then
-  "$ROOT/bin/cr" skills   # give agy the skills Claude Code has
-else
-  echo "  - agy not found - Antigravity routes will be skipped"
-fi
+command -v agy >/dev/null || echo "  - agy not found - Antigravity routes will be skipped"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "  ! $BIN is not on your PATH" ;; esac
