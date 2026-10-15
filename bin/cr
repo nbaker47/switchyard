@@ -7,6 +7,7 @@
 #   cr route "prompt"                     show the route a prompt would get (no model call)
 #   cr usage [--days N]                   tokens per subscription and routes taken
 #   cr dash                               live dashboard: routing feed, tokens, saving
+#   cr report [--days N] --json           all of it as JSON, for other dashboards
 #
 # Nothing here touches your global Claude Code config: the plugin, the prompt and the
 # model are passed as flags, so plain `claude` (and anything scheduled to run it) is
@@ -25,10 +26,11 @@ case "${1:-}" in
   agy)    shift; exec python3 "$ROOT/lib/agy.py" "$@" ;;
   models) shift; exec python3 "$ROOT/lib/agy.py" --list "$@" ;;
   usage)  shift; exec python3 "$ROOT/lib/usage.py" "$@" ;;
+  report) shift; exec python3 "$ROOT/lib/report.py" "$@" ;;
   dash)   shift; exec python3 "$ROOT/lib/dash.py" "$@" ;;
   route)  shift; exec python3 "$ROOT/plugin/hooks/route.py" --dry-run "$@" ;;
   -h|--help|help)
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 
