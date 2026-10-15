@@ -33,7 +33,27 @@ cr --safe                # same, with permission prompts
 cr models                # what your agy plan offers, and what each tier resolves to
 cr agy --tier fast "..." # hand a task to agy yourself
 cr usage [--days 7]      # tokens per subscription and model, and the routes taken
+cr route "some prompt"   # preview the route and model a prompt would get (no model call)
+cr dash                  # live dashboard for a side pane
 ```
+
+## Seeing the routing
+
+- **In the chat:** each prompt shows a notice such as
+  `⇄ reading request → route: scout → Haiku · Claude   ctx 45K`, and every reply ends with
+  the route that was actually taken (`route: worker (Sonnet)`).
+- **Status line:** your own status line still runs first, and switchyard adds one line below it:
+  `⇄ │ last: scout → haiku · Claude │ ctx 45K │ vs all-Opus −62% ($1.20 at API prices) │ 5h 10% · 7d 89%`
+- **`cr dash`:** a live view to run next to the chat. It shows the cost against an all-Opus
+  session, your plan's 5-hour and 7-day quota, tokens by provider and model, and a feed of
+  requests and the routes they took.
+
+**"Saved vs all-Opus"** prices every token that was actually processed (front desk,
+subagents, agy) as if Opus had processed it, and compares that with what each model really
+costs. agy work costs nothing on the Claude plan. The prices in `lib/prices.json` are API
+list prices, used only as weights. The figure is conservative because it doesn't credit
+the context that hand-offs kept out of the main conversation, which is usually the bigger
+saving.
 
 ## How it works
 

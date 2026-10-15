@@ -17,6 +17,7 @@ def load(name, rel):
 
 route = load("route", "plugin/hooks/route.py")
 agy = load("agy", "lib/agy.py")
+ledger = load("ledger", "lib/ledger.py")
 
 MODELS = [
     "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-low",
@@ -89,6 +90,56 @@ class Tiers(unittest.TestCase):
     def test_unknown_tier_fails_clearly(self):
         with self.assertRaises(SystemExit):
             agy.pick("opus", ["gemini-3.8-flash-low"])
+
+
+class Saving(unittest.TestCase):
+    """A session with a Sonnet front desk, one Haiku subagent and one agy run."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        ledger.CACHE = self.tmp / "cache"
+        ledger.STATE = self.tmp / "state"
+        ledger.STATE.mkdir()
+        sid = "s1"
+        main = self.tmp / f"{sid}.jsonl"
+
+        def usage_line(model, read, out, mid):
+            return json.dumps({"type": "assistant", "requestId": mid, "timestamp": "2026-10-15T12:00:00Z",
+                               "message": {"id": mid, "model": model, "content": [], "usage": {
+                                   "input_tokens": 0, "output_tokens": out,
+                                   "cache_read_input_tokens": read, "cache_creation_input_tokens": 0}}})
+
+        spawn = json.dumps({"type": "assistant", "timestamp": "2026-10-15T12:00:01Z", "message": {
+            "content": [{"type": "tool_use", "id": "tu1", "name": "Agent",
+                         "input": {"subagent_type": "switchyard:scout", "description": "find it"}}]}})
+        # The same response logged twice must count once.
+        main.write_text("\n".join([usage_line("claude-sonnet-5-5", 1_000_000, 10_000, "m1"),
+                                   usage_line("claude-sonnet-5-5", 1_000_000, 10_000, "m1"),
+                                   spawn]) + "\n")
+        sub = self.tmp / sid / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-a1.jsonl").write_text(usage_line("claude-haiku-5-5", 500_000, 5_000, "h1") + "\n")
+        (sub / "agent-a1.meta.json").write_text(json.dumps({"toolUseId": "tu1", "agentType": "switchyard:scout"}))
+        (ledger.STATE / "agy.jsonl").write_text(json.dumps({
+            "ts": 1, "session": sid, "model": "gemini-3.8-flash-medium", "status": "SUCCESS",
+            "input": 20_000, "output": 1_000, "thinking": 0, "cached": 0}) + "\n")
+        self.s = ledger.Ledger(sid, main).refresh().summary()
+
+    def test_prices_against_all_opus(self):
+        # Sonnet: 1M read * 0.20 + 10K out * 10 = 0.30. Haiku: 500K * 0.01 + 5K * 0.5 = 0.0075.
+        self.assertAlmostEqual(self.s["actual"], 0.3075, places=4)
+        # Opus: 0.20 + 0.20 (sonnet work) + 0.10 + 0.10 (haiku work) + 0.08 + 0.02 (agy work)
+        self.assertAlmostEqual(self.s["baseline"], 0.70, places=4)
+        self.assertAlmostEqual(self.s["saved_pct"], 56.07, places=1)
+
+    def test_feed_names_route_model_and_provider(self):
+        routes = [(e["route"], e["provider"], e["model"]) for e in self.s["feed"] if e["kind"] == "route"]
+        self.assertIn(("switchyard:scout", "Claude", "haiku"), routes)
+        self.assertIn(("agy", "Antigravity", "gemini-3.8-flash-medium"), routes)
+
+    def test_incremental_refresh_does_not_double_count(self):
+        again = ledger.Ledger("s1", self.tmp / "s1.jsonl").refresh().summary()
+        self.assertAlmostEqual(again["actual"], self.s["actual"])
 
 
 if __name__ == "__main__":
