@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import quota  # noqa: E402
 from ledger import FIELDS, STATE, Ledger, cost, opus_cost, short  # noqa: E402
 
-SCHEMA = 1
+SCHEMA = 2  # 2: adds requests
 
 
 def sessions_since(since):
@@ -50,7 +50,7 @@ def build(days):
     daily = collections.defaultdict(lambda: collections.defaultdict(lambda: dict.fromkeys(FIELDS, 0)))
     models = collections.defaultdict(lambda: dict.fromkeys(FIELDS, 0))
     taken, suggested = collections.Counter(), collections.Counter()
-    feed, sessions = [], []
+    feed, sessions, requests = [], [], []
     tot_actual = tot_base = 0.0
 
     for sid, meta in sessions_since(since).items():
@@ -77,6 +77,7 @@ def build(days):
             else:
                 suggested[e["route"]] += 1
             feed.append({**e, "session": sid})
+        requests += [{**r, "session": sid} for r in s["requests"] if r["ts"] >= since]
         tot_actual += s["actual"]
         tot_base += s["baseline"]
         sessions.append({
@@ -127,6 +128,7 @@ def build(days):
         "routes": {"taken": dict(taken), "suggested": dict(suggested)},
         "sessions": sorted(sessions, key=lambda s: -s["last"]),
         "feed": feed[-60:],
+        "requests": sorted(requests, key=lambda r: r["ts"])[-200:],
     }
 
 

@@ -22,7 +22,7 @@ STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "switchyard"
 PRICES = json.loads((HERE / "prices.json").read_text())
 FIELDS = ("input", "output", "cache_read", "cache_write")
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 
 def price_of(model):
@@ -84,7 +84,7 @@ class Ledger:
         except (OSError, ValueError):
             pass
         return {"v": CACHE_VERSION, "offsets": {}, "seen": {}, "main": {}, "agents": {},
-                "spawns": {}, "daily": {}}
+                "spawns": {}, "daily": {}, "calls": []}
 
     def _save(self):
         CACHE.mkdir(parents=True, exist_ok=True)
@@ -113,11 +113,18 @@ class Ledger:
             except ValueError:
                 continue
 
-    def _count(self, path, bucket):
+    def _count(self, path, bucket, calls=None, span=None):
+        """Add new usage from path to bucket. calls, if given, gets one entry per model call
+        [ts, model, tokens, cost, opus_cost]; span, if given, gets the first and last
+        timestamps seen (a subagent's start and end)."""
         recent = self.s["seen"].get(str(path), [])  # in order, so trimming keeps the newest
         seen = set(recent)
         for d in self._read_new(path):
             m = d.get("message") if isinstance(d.get("message"), dict) else {}
+            ts = _iso_to_ts(d.get("timestamp"))
+            if span is not None and ts:
+                span["start"] = min(span.get("start") or ts, ts)
+                span["end"] = max(span.get("end") or ts, ts)
             if d.get("type") == "assistant":
                 for block in m.get("content") or []:
                     if not isinstance(block, dict) or block.get("type") != "tool_use":
@@ -142,11 +149,15 @@ class Ledger:
             for f, v in _usage(u).items():
                 c[f] += v
                 dc[f] += v
+            if calls is not None and ts:
+                use = _usage(u)
+                calls.append([ts, model, sum(use.values()), round(cost(model, use), 6),
+                              round(opus_cost(use), 6)])
         self.s["seen"][str(path)] = recent[-500:]
 
     def refresh(self):
         if self.transcript and self.transcript.exists():
-            self._count(self.transcript, self.s["main"])
+            self._count(self.transcript, self.s["main"], calls=self.s["calls"])
             sub = self.transcript.with_suffix("") / "subagents"
             for path in sorted(glob.glob(str(sub / "agent-*.jsonl"))):
                 agent = self.s["agents"].setdefault(path, {"usage": {}})
@@ -157,7 +168,7 @@ class Ledger:
                         agent["type"] = meta.get("agentType")
                     except (OSError, ValueError):
                         pass
-                self._count(Path(path), agent["usage"])
+                self._count(Path(path), agent["usage"], span=agent)
         self._save()
         return self
 
@@ -187,7 +198,8 @@ class Ledger:
                         r = json.loads(line)
                     except ValueError:
                         continue
-                    if r.get("session") == self.sid:
+                    if r.get("session") == self.sid and \
+                            not (r.get("prompt") or "").startswith("<task-notification>"):
                         out.append(r)
         except OSError:
             pass
@@ -218,7 +230,10 @@ class Ledger:
                 models.append(short(model))
             actual += a_cost
             baseline += a_opus
-            feed.append({"ts": spawn.get("ts", 0), "kind": "route",
+            start = agent.get("start") or spawn.get("ts", 0)
+            feed.append({"ts": spawn.get("ts") or start, "kind": "route",
+                         "start": start, "end": agent.get("end") or start,
+                         "seconds": round((agent.get("end") or start) - start, 1),
                          "route": spawn.get("agent") or agent.get("type") or "subagent",
                          "provider": "Claude", "model": "/".join(models) or "?",
                          "desc": spawn.get("desc", ""), "tokens": tokens,
@@ -231,7 +246,9 @@ class Ledger:
                 by[("Antigravity", r.get("model", "?"))][f] += c[f]
             a_opus = opus_cost(c)
             baseline += a_opus  # costs nothing on the Claude plan
-            feed.append({"ts": r.get("ts", 0), "kind": "route", "route": "agy",
+            end, secs = r.get("ts", 0), r.get("seconds") or 0
+            feed.append({"ts": end - secs, "start": end - secs, "end": end, "seconds": secs,
+                         "kind": "route", "route": "agy",
                          "provider": "Antigravity", "model": r.get("model", "?"),
                          "desc": r.get("status", ""), "tokens": sum(c.values()),
                          "cost": 0.0, "opus": a_opus})
@@ -242,13 +259,50 @@ class Ledger:
 
         feed.sort(key=lambda e: e["ts"])
         last = next((e for e in reversed(feed) if e["kind"] == "route"), None)
+        requests = self._requests(feed)
         return {
             "by": {f"{prov}|{model}": c for (prov, model), c in by.items()},
             "actual": actual, "baseline": baseline,
             "saved": baseline - actual,
             "saved_pct": 100 * (baseline - actual) / baseline if baseline else 0.0,
-            "feed": feed, "last": last,
+            "feed": feed, "last": last, "requests": requests,
         }
+
+    def _requests(self, feed):
+        """One entry per user request: when it came in, what it was handed to, how long the
+        whole turn took, its tokens, and its cost against the same work done by Opus.
+
+        A request owns everything from its prompt until the next prompt: the front desk's
+        own model calls and every hand-off that started in that window."""
+        prompts = [e for e in feed if e["kind"] == "prompt"]
+        routes = [e for e in feed if e["kind"] == "route"]
+        calls = sorted(self.s.get("calls", []))
+        out = []
+        for i, p in enumerate(prompts):
+            t0 = p["ts"]
+            t1 = prompts[i + 1]["ts"] if i + 1 < len(prompts) else float("inf")
+            mine = [c for c in calls if t0 - 1 <= c[0] < t1]
+            handoffs = [r for r in routes if t0 - 1 <= r["ts"] < t1]
+            desk = {"tokens": sum(c[2] for c in mine), "cost": sum(c[3] for c in mine),
+                    "opus": sum(c[4] for c in mine),
+                    "models": sorted({short(c[1]) for c in mine})}
+            ends = [c[0] for c in mine] + [h.get("end") or h["ts"] for h in handoffs]
+            end = max(ends) if ends else t0
+            tokens = desk["tokens"] + sum(h.get("tokens", 0) for h in handoffs)
+            cost_ = desk["cost"] + sum(h.get("cost", 0) for h in handoffs)
+            opus = desk["opus"] + sum(h.get("opus", 0) for h in handoffs)
+            out.append({
+                "ts": t0, "end": end, "seconds": round(max(0.0, end - t0), 1),
+                "prompt": p.get("desc", ""), "hint": p.get("route"), "context": p.get("context", 0),
+                "desk": {k: (round(v, 6) if isinstance(v, float) else v) for k, v in desk.items()},
+                "handoffs": [{k: h.get(k) for k in ("route", "provider", "model", "start", "end",
+                                                   "seconds", "tokens", "cost", "opus", "desc")}
+                             for h in handoffs],
+                "route": ", ".join(h["route"].split(":")[-1] for h in handoffs) or "self",
+                "tokens": tokens, "cost": round(cost_, 6), "opus": round(opus, 6),
+                "saved_pct": round(100 * (opus - cost_) / opus, 1) if opus else 0.0,
+            })
+        return out
 
 
 def latest_session():
