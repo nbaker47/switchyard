@@ -1,0 +1,10 @@
+{
+  "_about": "API list prices in USD per million tokens. Used only to weigh models against each other for the 'saved vs all-Opus' figure; subscriptions are not billed this way. A model is priced by the first family name its id contains. Update these when Anthropic's prices change.",
+  "baseline": "opus",
+  "families": {
+    "fable":  {"input": 10.0, "output": 50.0, "cache_read": 0.25, "cache_write": 12.5},
+    "opus":   {"input": 4.0,  "output": 20.0, "cache_read": 0.20, "cache_write": 5.0},
+    "sonnet": {"input": 2.0,  "output": 10.0, "cache_read": 0.20, "cache_write": 2.5},
+    "haiku":  {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125}
+  }
+}

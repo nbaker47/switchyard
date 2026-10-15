@@ -90,7 +90,7 @@ def run(task, model, effort=None, timeout=0):
     log({
         "ts": time.time(), "model": model, "status": result.get("status"),
         "seconds": round(time.time() - started, 1), "cwd": os.getcwd(),
-        "session": os.environ.get("CLAUDE_SESSION_ID"),
+        "session": os.environ.get("CLAUDE_CODE_SESSION_ID"),
         "conversation": result.get("conversation_id"),
         "input": usage.get("input_tokens", 0), "output": usage.get("output_tokens", 0),
         "thinking": usage.get("thinking_tokens", 0), "cached": usage.get("cache_read_tokens", 0),
