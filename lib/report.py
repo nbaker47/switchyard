@@ -74,7 +74,7 @@ def build(days):
         for e in s["feed"]:
             if e["kind"] == "route":
                 taken[e["route"].split(":")[-1]] += 1
-            else:
+            elif e.get("route"):  # older logs carried a keyword guess
                 suggested[e["route"]] += 1
             feed.append({**e, "session": sid})
         requests += [{**r, "session": sid} for r in s["requests"] if r["ts"] >= since]

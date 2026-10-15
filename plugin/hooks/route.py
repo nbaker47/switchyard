@@ -1,12 +1,15 @@
-"""UserPromptSubmit hook: suggest a route for the prompt, and flag a large context.
+"""UserPromptSubmit hook: tell the front desk the facts it needs to route, and show the user
+one line about it.
 
-It costs no model tokens: the classification is a few keyword rules. The suggestion is a
-hint for the front-desk model, which makes the final call with the routing rules in
-prompts/router.md. Every decision is appended to routes.jsonl for `cr usage`.
+It does not guess a route. The front-desk model reads the request and decides, using the
+rules in prompts/router.md; it understands requests far better than keyword rules could, and
+it is reading the request anyway, so deciding there costs nothing extra. This hook only adds
+what that model cannot see for itself: how full the Claude plan is (and so whether saver
+mode is on), how large the conversation has grown, and which Antigravity models exist today.
+Each prompt is appended to routes.jsonl for `cr usage`, `cr dash` and `cr report`.
 """
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -15,51 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
 import quota  # noqa: E402
 
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "switchyard"
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "switchyard"
 CLEAR_AT = int(os.environ.get("CR_CLEAR_AT", "120000"))
-
-ROUTES = {
-    "self": "answer directly, no hand-off",
-    "scout": "scout subagent (Haiku) - read-only lookup",
-    "worker": "worker subagent (Sonnet) - scoped change",
-    "deep": "deep subagent (Opus) - hard reasoning",
-    "agy-fast": "`cr agy --tier fast` (Gemini Flash) - bulk or mechanical work",
-    "agy-strong": "`cr agy --tier strong` (Gemini Argon) - large-context or second opinion",
-    "agy-sonnet": "`cr agy --tier sonnet` (Claude Sonnet on the Antigravity plan) - scoped change",
-}
-
-# When the Claude plan is nearly used up, Claude-heavy routes move to the Antigravity plan.
-SAVER = {"deep": "agy-strong", "worker": "agy-sonnet"}
-
-
-def apply_saver(route, active):
-    return SAVER.get(route, route) if active else route
-
-# First match wins, so the order matters: bulk before deep before lookup before change.
-RULES = [
-    ("agy-strong", r"\b(second opinion|whole (repo|codebase)|entire (repo|codebase)|across the (repo|codebase))\b"),
-    ("agy-fast", r"\b(scaffold|boilerplate|generate (unit )?tests|write tests for (all|every)|"
-                 r"(all|every|each) (the )?(files?|tests?|components?|modules?|endpoints?)|"
-                 r"migrate|bulk|summari[sz]e|translate|transcribe|rename \S+ (across|everywhere))\b"),
-    ("deep", r"\b(architect\w*|design|root cause|why (does|is|did)|race condition|deadlock|"
-             r"security|threat model|trade-?offs?|strategy|prove|plan (for|out)|how should we)\b"),
-    ("scout", r"(^|\b)(where (is|are|do|does)|which files?|find|search|grep|look up|list|"
-              r"what does \S+ do|show me)\b"),
-    ("worker", r"\b(fix|add|implement|change|update|refactor|build|write|remove|delete|rename|"
-               r"make|wire|hook up|bump)\b"),
-]
-
-
-def classify(prompt):
-    text = prompt.lower().strip()
-    if not text:
-        return "self", "empty prompt"
-    if len(text) > 6000:
-        return "agy-fast", "long pasted input"
-    for route, pattern in RULES:
-        m = re.search(pattern, text)
-        if m:
-            return route, f'matched "{m.group(0).strip()}"'
-    return "self", "conversational or short"
+WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "7-day"}
 
 
 def context_tokens(transcript_path):
@@ -69,7 +30,7 @@ def context_tokens(transcript_path):
             f.seek(0, 2)
             f.seek(max(0, f.tell() - 512 * 1024))
             lines = f.read().decode("utf-8", "ignore").splitlines()
-    except OSError:
+    except (OSError, TypeError):
         return 0
     for line in reversed(lines):
         if '"usage"' not in line:
@@ -83,54 +44,76 @@ def context_tokens(transcript_path):
     return 0
 
 
-def advise(prompt, transcript_path, saver=None):
-    active, pct = quota.saver() if saver is None else saver
-    route, why = classify(prompt)
-    if apply_saver(route, active) != route:
-        why += f", saver mode moved it from {route}"
-        route = apply_saver(route, active)
+def agy_tiers():
+    """How each agy tier resolves today, from the cached model list (never calls agy here)."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+        import agy
+        models = (CACHE / "agy-models.txt").read_text().split()
+    except (OSError, ImportError):
+        return {}
+    out = {}
+    for tier in agy.TIERS:
+        try:
+            out[tier] = agy.pick(tier, models)
+        except SystemExit:
+            pass
+    return out
+
+
+def saver_state(q=None):
+    q = quota.latest() if q is None else q
+    active, pct = quota.saver(q)
+    win = quota.window(q)
+    resets = (q.get(win) or {}).get("resets_at") if win else None
+    return {"active": active, "pct": pct, "window": WINDOW_NAMES.get(win, win), "resets": resets}
+
+
+def facts(transcript_path, saver, tiers):
+    """The context added to the prompt for the front desk."""
     ctx = context_tokens(transcript_path) if transcript_path else 0
-    lines = [f"[switchyard] suggested route: {route} = {ROUTES[route]} ({why}). "
-             f"Context so far: ~{ctx // 1000}K tokens."]
-    if active:
-        lines.append(f"[switchyard] Saver mode: the Claude plan is at {pct:.0f}% of a limit "
-                     f"(threshold {quota.SAVER_AT:.0f}%). Use the Antigravity plan for anything "
-                     "substantial: `cr agy --tier strong` instead of the deep subagent, "
-                     "`cr agy --tier sonnet` or `--tier fast` instead of the worker subagent. "
-                     "The scout subagent (Haiku) is cheap enough to keep.")
+    lines = [f"[switchyard] Context so far: ~{ctx // 1000}K tokens."]
+    if saver["active"]:
+        when = time.strftime("%a %H:%M", time.localtime(saver["resets"])) if saver["resets"] else "its reset"
+        lines.append(
+            f"[switchyard] SAVER MODE ON: the Claude plan's {saver['window']} limit is at "
+            f"{saver['pct']:.0f}% (threshold {quota.SAVER_AT:.0f}%) until {when}. Any request that "
+            "needs work (reading files or data, running commands, searching, editing, reasoning "
+            "at length) goes to the Antigravity plan via `cr agy`. Answer yourself only from what "
+            "is already in this conversation. A tiny lookup may still use the scout subagent.")
+    elif saver["pct"] is not None:
+        lines.append(f"[switchyard] Claude plan at {saver['pct']:.0f}% of its {saver['window']} limit; "
+                     "saver mode off.")
+    if tiers:
+        lines.append("[switchyard] agy tiers today: " + ", ".join(f"{t}={m}" for t, m in tiers.items()) + ".")
     if ctx > CLEAR_AT:
-        lines.append(f"[switchyard] The context is over {CLEAR_AT // 1000}K tokens. Hand off "
-                     "anything that reads a lot. If this request is unrelated to the conversation "
-                     "so far, tell the user in one line that /clear would make every following "
-                     "turn cheaper.")
-    return route, ctx, "\n".join(lines)
+        lines.append(f"[switchyard] The context is over {CLEAR_AT // 1000}K tokens. If this request "
+                     "is unrelated to the conversation so far, say in one line that /clear would "
+                     "make every following turn cheaper.")
+    return ctx, "\n".join(lines)
 
 
-def dry_run(prompts):
-    """`cr route "..."`: show the hint each prompt would get, and the model behind it."""
-    models = {"self": "front desk (CR_FRONT_MODEL, default sonnet)", "scout": "haiku",
-              "worker": "sonnet", "deep": "opus"}
-    active, pct = quota.saver()
-    if active:
-        print(f"saver mode on: Claude plan at {pct:.0f}% (threshold {quota.SAVER_AT:.0f}%)")
-    for prompt in prompts:
-        route, why = classify(prompt)
-        route = apply_saver(route, active)
-        model = models.get(route)
-        if model is None:  # an agy tier: resolve it against the live model list
-            import agy
-            try:
-                model = "agy " + agy.pick(route.split("-")[1], agy.list_models())
-            except (SystemExit, OSError) as e:
-                model = f"agy (unavailable: {e})"
-        print(f"{route:<10} -> {model:<34} {why}   ← {prompt[:60]}")
+def notice(ctx, saver):
+    """The one line the user sees in the TUI for each prompt."""
+    parts = ["⇄ reading request"]
+    if saver["active"]:
+        parts.append(f"⛽ saver mode ({saver['window']} {saver['pct']:.0f}%)")
+    parts.append(f"ctx {ctx // 1000}K" + ("  ⚠ large, /clear if unrelated" if ctx > CLEAR_AT else ""))
+    return " · ".join(parts)
+
+
+def show_state():
+    """`cr route`: what the front desk is told right now."""
+    saver = saver_state()
+    _, text = facts(None, saver, agy_tiers())
+    print(text.replace("[switchyard] ", ""))
+    print("The front desk reads each request and picks the route itself; see prompts/router.md.")
     return 0
 
 
 def main():
     if sys.argv[1:2] == ["--dry-run"]:
-        prompts = sys.argv[2:] or [line.strip() for line in sys.stdin if line.strip()]
-        return dry_run(prompts)
+        return show_state()
     try:
         data = json.load(sys.stdin)
     except ValueError:
@@ -138,33 +121,22 @@ def main():
     prompt = data.get("prompt") or ""
     if prompt.lstrip().startswith("<task-notification>"):
         return 0  # a background job reporting back, not a request from the user
-    saver = quota.saver()
-    route, ctx, text = advise(prompt, data.get("transcript_path"), saver)
+    saver = saver_state()
+    ctx, text = facts(data.get("transcript_path"), saver, agy_tiers())
     try:
         STATE.mkdir(parents=True, exist_ok=True)
         with open(STATE / "routes.jsonl", "a") as f:
             f.write(json.dumps({"ts": time.time(), "session": data.get("session_id"),
-                                "route": route, "context": ctx, "cwd": data.get("cwd"),
-                                "transcript": data.get("transcript_path"),
+                                "route": None, "saver": saver["active"], "context": ctx,
+                                "cwd": data.get("cwd"), "transcript": data.get("transcript_path"),
                                 "prompt": " ".join(prompt.split())[:120]}) + "\n")
     except OSError:
         pass
     out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}
     if os.environ.get("CR_NOTICE", "1") == "1":
-        out["systemMessage"] = notice(route, ctx, saver)
+        out["systemMessage"] = notice(ctx, saver)
     print(json.dumps(out))
     return 0
-
-
-def notice(route, ctx, saver=(False, None)):
-    """The one line the user sees in the TUI for each prompt."""
-    target = {"self": "front desk", "scout": "Haiku · Claude", "worker": "Sonnet · Claude",
-              "deep": "Opus · Claude", "agy-fast": "Gemini Flash · Antigravity",
-              "agy-strong": "Gemini Argon · Antigravity",
-              "agy-sonnet": "Sonnet · Antigravity"}[route]
-    big = "  ⚠ large, /clear if unrelated" if ctx > CLEAR_AT else ""
-    save = f"  ⛽ saver mode (Claude plan {saver[1]:.0f}%)" if saver[0] else ""
-    return f"⇄ reading request → route: {route} → {target}   ctx {ctx // 1000}K{big}{save}"
 
 
 if __name__ == "__main__":

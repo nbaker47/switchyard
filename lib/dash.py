@@ -88,7 +88,7 @@ def render(sid, transcript, width):
         t = time.strftime("%H:%M:%S", time.localtime(e["ts"])) if e["ts"] else "--:--:--"
         if e["kind"] == "prompt":
             out.append(f"  {DIM}{t}{R}  {CYAN}▸ request{R}  {e['desc'][:w - 44]!r:.{w - 40}}  "
-                       f"{DIM}hint {e['route']}{R}")
+                       (f"{DIM}hint {e['route']}{R}" if e.get("route") else ""))
         else:
             color = PROVIDER_COLOR.get(e["provider"], "")
             saved = f"saved ${e['opus'] - e['cost']:.2f}" if e["opus"] else ""

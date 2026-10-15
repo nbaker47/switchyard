@@ -27,30 +27,6 @@ MODELS = [
 ]
 
 
-class Classify(unittest.TestCase):
-    def check(self, prompt, expected):
-        self.assertEqual(route.classify(prompt)[0], expected, prompt)
-
-    def test_routes(self):
-        self.check("where is the session store defined?", "scout")
-        self.check("find every call to fetchUser", "scout")
-        self.check("fix the off-by-one in pagination", "worker")
-        self.check("why does the strip flicker on wake", "deep")
-        self.check("how should we split the billing service", "deep")
-        self.check("generate tests for the parser", "agy-fast")
-        self.check("migrate all files to the new logger", "agy-fast")
-        self.check("get a second opinion on this design", "agy-strong")
-        self.check("thanks, that looks good", "self")
-        self.check("", "self")
-
-    def test_long_paste_goes_to_bulk(self):
-        self.assertEqual(route.classify("x " * 4000)[0], "agy-fast")
-
-    def test_whole_words_only(self):
-        # "address" contains "add", "planet" contains "plan"
-        self.check("the address field looks off to me", "self")
-
-
 class Context(unittest.TestCase):
     def test_reads_last_usage(self):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
@@ -65,20 +41,33 @@ class Context(unittest.TestCase):
         self.assertEqual(route.context_tokens("/nonexistent.jsonl"), 0)
 
     def test_nudges_only_when_large(self):
+        off = {"active": False, "pct": None, "window": None, "resets": None}
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
             f.write(json.dumps({"message": {"usage": {"cache_read_input_tokens": 300000}}}) + "\n")
-        self.assertIn("/clear", route.advise("hello", f.name, (False, None))[2])
-        self.assertNotIn("/clear", route.advise("hello", None, (False, None))[2])
+        self.assertIn("/clear", route.facts(f.name, off, {})[1])
+        self.assertNotIn("/clear", route.facts(None, off, {})[1])
 
 
-class SaverMode(unittest.TestCase):
-    def test_moves_claude_heavy_routes_to_antigravity(self):
-        self.assertEqual(route.advise("why does it deadlock", None, (True, 91))[0], "agy-strong")
-        self.assertEqual(route.advise("fix the login bug", None, (True, 91))[0], "agy-sonnet")
-        self.assertEqual(route.advise("where is the config", None, (True, 91))[0], "scout")
+class Facts(unittest.TestCase):
+    """The hook states facts; it never picks a route."""
 
-    def test_off_below_threshold(self):
-        self.assertEqual(route.advise("why does it deadlock", None, (False, 40))[0], "deep")
+    def test_saver_mode_is_spelled_out(self):
+        on = {"active": True, "pct": 91, "window": "7-day", "resets": None}
+        text = route.facts(None, on, {"fast": "gemini-3.8-flash-medium"})[1]
+        self.assertIn("SAVER MODE ON", text)
+        self.assertIn("7-day limit is at 91%", text)
+        self.assertIn("fast=gemini-3.8-flash-medium", text)
+        self.assertIn("saver mode (7-day 91%)", route.notice(0, on))
+
+    def test_saver_off_mentions_usage_only(self):
+        off = {"active": False, "pct": 40, "window": "5-hour", "resets": None}
+        text = route.facts(None, off, {})[1]
+        self.assertNotIn("SAVER MODE ON", text)
+        self.assertIn("40%", text)
+        self.assertNotIn("saver", route.notice(0, off))
+
+    def test_no_route_is_guessed(self):
+        self.assertFalse(hasattr(route, "classify"))
 
     def test_reads_quota_and_ignores_reset_windows(self):
         import time
@@ -86,6 +75,7 @@ class SaverMode(unittest.TestCase):
              "five_hour": {"used_percentage": 95, "resets_at": time.time() - 10},
              "seven_day": {"used_percentage": 50, "resets_at": time.time() + 999}}
         self.assertEqual(route.quota.used(q), 50)
+        self.assertEqual(route.quota.window(q), "seven_day")
         self.assertEqual(route.quota.saver({**q, "updated": 0}), (False, None))
 
 
