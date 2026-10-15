@@ -1,0 +1,7 @@
+{
+  "name": "switchyard",
+  "version": "0.1.0",
+  "description": "Routes each request to the cheapest model that can do it: Claude subagents by tier, or the Antigravity CLI. Loaded per session by the cr launcher.",
+  "license": "MIT",
+  "keywords": ["routing", "cost", "subagents", "antigravity"]
+}

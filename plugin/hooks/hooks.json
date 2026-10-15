@@ -1,0 +1,16 @@
+{
+  "description": "switchyard: suggest a route for each prompt and say when the context is getting large",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/route.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
