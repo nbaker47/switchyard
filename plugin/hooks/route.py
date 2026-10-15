@@ -112,17 +112,33 @@ def main():
         data = json.load(sys.stdin)
     except ValueError:
         return 0
-    route, ctx, text = advise(data.get("prompt") or "", data.get("transcript_path"))
+    prompt = data.get("prompt") or ""
+    if prompt.lstrip().startswith("<task-notification>"):
+        return 0  # a background job reporting back, not a request from the user
+    route, ctx, text = advise(prompt, data.get("transcript_path"))
     try:
         STATE.mkdir(parents=True, exist_ok=True)
         with open(STATE / "routes.jsonl", "a") as f:
             f.write(json.dumps({"ts": time.time(), "session": data.get("session_id"),
-                                "route": route, "context": ctx, "cwd": data.get("cwd")}) + "\n")
+                                "route": route, "context": ctx, "cwd": data.get("cwd"),
+                                "transcript": data.get("transcript_path"),
+                                "prompt": " ".join(prompt.split())[:120]}) + "\n")
     except OSError:
         pass
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
-                                             "additionalContext": text}}))
+    out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}
+    if os.environ.get("CR_NOTICE", "1") == "1":
+        out["systemMessage"] = notice(route, ctx)
+    print(json.dumps(out))
     return 0
+
+
+def notice(route, ctx):
+    """The one line the user sees in the TUI for each prompt."""
+    target = {"self": "front desk", "scout": "Haiku · Claude", "worker": "Sonnet · Claude",
+              "deep": "Opus · Claude", "agy-fast": "Gemini Flash · Antigravity",
+              "agy-strong": "Gemini Argon · Antigravity"}[route]
+    big = "  ⚠ large, /clear if unrelated" if ctx > CLEAR_AT else ""
+    return f"⇄ reading request → route: {route} → {target}   ctx {ctx // 1000}K{big}"
 
 
 if __name__ == "__main__":
