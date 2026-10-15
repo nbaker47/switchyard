@@ -135,6 +135,13 @@ end user signing in to the unmodified Claude Code binary with their own Claude s
 Proxies that reuse a subscription login outside the official client are what is not allowed.
 This is our reading of the terms, not legal advice.
 
+## Skills on both sides
+
+Claude Code reads skills from `~/.claude/skills` (and `~/.agents/skills`); agy reads them from
+`~/.gemini/config/skills`. They use the same `SKILL.md` format, so `cr skills` links yours into
+agy's folder (symlinks only; `install.sh` runs it). Re-run it after adding a skill. The front
+desk names the skill to use when it briefs agy, e.g. a design-taste skill for UI work.
+
 ## Limits
 
 - `cr usage` shows token counts, not how much of your plan is left. Neither CLI reports that.

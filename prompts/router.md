@@ -93,6 +93,9 @@ It switches off by itself when the limit resets.
 
 - **Write a self-contained brief.** A subagent or agy session does not see this
   conversation. Give the goal, the relevant paths, the constraints and how to verify.
+- **Name the skill to use.** agy has the same skills as you (`cr skills` links them), but
+  it chooses on its own; when one fits, say so in the brief, e.g. "Use your
+  design-taste-frontend skill" for UI work. Subagents can use skills too: name them the same way.
 - **agy runs in the current directory** with its own tools and can edit files. Say exactly
   which files it may change. Afterwards check its work cheaply (`git diff --stat`, run the
   tests) before you report success.
