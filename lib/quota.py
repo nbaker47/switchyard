@@ -40,6 +40,15 @@ def used(q=None):
     return max(vals) if vals else None
 
 
+def window(q=None):
+    """Which window is the fuller one: "five_hour" or "seven_day" (None if unknown)."""
+    q = latest() if q is None else q
+    live = {k: (q.get(k) or {}).get("used_percentage") for k in ("five_hour", "seven_day")
+            if (q.get(k) or {}).get("resets_at", 1e18) > time.time()}
+    live = {k: v for k, v in live.items() if isinstance(v, (int, float))}
+    return max(live, key=live.get) if live else None
+
+
 def saver(q=None):
     """(active, percent): saver mode is on when the plan is at or above CR_SAVER_AT."""
     pct = used(q)

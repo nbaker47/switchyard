@@ -250,7 +250,7 @@ class Ledger:
             feed.append({"ts": end - secs, "start": end - secs, "end": end, "seconds": secs,
                          "kind": "route", "route": "agy",
                          "provider": "Antigravity", "model": r.get("model", "?"),
-                         "desc": r.get("status", ""), "tokens": sum(c.values()),
+                         "desc": r.get("task") or r.get("status", ""), "tokens": sum(c.values()),
                          "cost": 0.0, "opus": a_opus})
 
         for p in self.prompts():

@@ -112,7 +112,8 @@ def build(days):
     feed.sort(key=lambda e: e["ts"])
     return {
         "schema": SCHEMA, "generated": time.time(), "days": days,
-        "quota": q, "saver": {"active": active, "used": pct, "threshold": quota.SAVER_AT},
+        "quota": q, "saver": {"active": active, "used": pct, "threshold": quota.SAVER_AT,
+                  "window": quota.window(q)},
         "totals": {
             "actual": round(tot_actual, 4), "baseline": round(tot_base, 4),
             "saved": round(tot_base - tot_actual, 4),
