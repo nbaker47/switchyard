@@ -35,6 +35,7 @@ cr agy --tier fast "..." # hand a task to agy yourself
 cr usage [--days 7]      # tokens per subscription and model, and the routes taken
 cr route "some prompt"   # preview the route and model a prompt would get (no model call)
 cr dash                  # live dashboard for a side pane
+cr report --json         # everything above as JSON, for your own dashboards (versioned schema)
 ```
 
 ## Seeing the routing
@@ -81,6 +82,12 @@ conversation again for the new model. So switchyard routes **tasks**, not messag
    agy session. The front desk only sees a short report back, so every following turn
    costs less. `cr` also sets `--autocompact 160k` (`CR_AUTOCOMPACT`).
 
+5. **Saver mode.** When your Claude plan reaches 80% of its 5-hour or 7-day limit
+   (`CR_SAVER_AT`), hard work goes to Gemini Argon and scoped changes go to Sonnet on the
+   Antigravity plan. Cheap Haiku lookups stay on Claude. It switches off when the window
+   resets. The usage figures come from Claude Code's status line, so they are as fresh as
+   your last `cr` session.
+
 **No hard-coded model list.** agy tiers are matched by family name (flash, argon, pro, opus,
 sonnet) and compute level against what `agy models` returns for your account. Claude tiers
 use Claude Code's aliases (`haiku`, `sonnet`, `opus`), which always point at the current
@@ -118,6 +125,8 @@ This is our reading of the terms, not legal advice.
 | `CR_SAFE` | `0` | `1` turns yolo mode off |
 | `CR_AUTOCOMPACT` | `160k` | auto-compact threshold |
 | `CR_CLEAR_AT` | `120000` | context size (tokens) at which the hook suggests `/clear` |
+| `CR_SAVER_AT` | `80` | Claude plan usage (%) at which saver mode starts |
+| `CR_NOTICE` | `1` | `0` hides the per-prompt routing notice |
 
 Logs live in `~/.local/state/switchyard/`: `routes.jsonl` and `agy.jsonl`.
 
