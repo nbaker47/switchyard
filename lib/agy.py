@@ -69,8 +69,23 @@ def log(record):
         f.write(json.dumps(record) + "\n")
 
 
-def run(task, model, effort=None, timeout=0):
-    cmd = ["agy", "--model", model, "--output-format", "json"]
+MAX_PROGRESS = 30
+
+
+def describe(step):
+    """One short line for a tool step: the tool and the first thing it was given."""
+    info = step.get("tool_info") or {}
+    params = info.get("parameters") or {}
+    detail = next((str(v) for v in params.values() if isinstance(v, str) and v.strip()), "")
+    if "/" in detail and len(detail) > 50:
+        detail = detail.rsplit("/", 1)[-1]
+    detail = " ".join(detail.split())
+    return f"{step.get('tool_name') or info.get('name') or 'tool'} {detail[:70]}".rstrip()
+
+
+def run(task, model, effort=None, timeout=0, progress=print):
+    """Run agy, reporting each tool step as it happens, and return its final result."""
+    cmd = ["agy", "--model", model, "--output-format", "stream-json"]
     if os.environ.get("CR_YOLO", "1") == "1":
         cmd.append("--dangerously-skip-permissions")
     else:
@@ -81,11 +96,27 @@ def run(task, model, effort=None, timeout=0):
         cmd += ["--print-timeout", f"{timeout}s"]
     cmd += ["-p", task]
     started = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    try:
-        result = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        result = {"status": "ERROR", "response": (proc.stdout + proc.stderr).strip()}
+    result, shown, hidden, other = {}, 0, 0, []
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as proc:
+        for line in proc.stdout:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                other.append(line)
+                continue
+            if event.get("event") == "result":
+                result = event.get("result") or {}
+            step = event.get("step_update") or {}
+            if step.get("step_type") == "tool" and step.get("state") == "ACTIVE":
+                if shown < MAX_PROGRESS:
+                    progress(f"  · {time.time() - started:4.0f}s  {describe(step)}")
+                    shown += 1
+                else:
+                    hidden += 1
+    if hidden:
+        progress(f"  · … and {hidden} more steps")
+    if not result:
+        result = {"status": "ERROR", "response": "".join(other).strip() or "agy returned nothing"}
     usage = result.get("usage") or {}
     log({
         "ts": time.time(), "model": model, "status": result.get("status"),
@@ -124,8 +155,9 @@ def main(argv=None):
     if not task.strip():
         p.error("no task given")
     model = pick(a.tier, models)
-    result = run(task, model, a.effort, a.timeout)
-    print(f"[agy {model} · {result.get('status', '?')}]")
+    print(f"[agy {model}] started", flush=True)
+    result = run(task, model, a.effort, a.timeout, lambda m: print(m, flush=True))
+    print(f"[agy {model} · {result.get('status', '?')} · {result.get('duration_seconds') or 0:.0f}s]")
     print((result.get("response") or "").strip())
     return 0 if result.get("status") == "SUCCESS" else 1
 
