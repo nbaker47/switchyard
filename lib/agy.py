@@ -4,7 +4,8 @@ It runs your own, already signed-in `agy` in print mode. Your Antigravity login 
 read or forwarded. Models are never hard-coded: a tier is matched against the list that
 `agy models` returns for your account, so new models are picked up automatically.
 
-    cr agy [--tier fast|cheap|strong|opus|sonnet|<model id>] [--effort LEVEL] "task"
+    cr agy [--tier fast|cheap|strong|opus|sonnet|<model id>] [--effort LEVEL] [--bare] "task"
+    cr agy --show-context
     cr models
 """
 import argparse
@@ -71,6 +72,185 @@ def log(record):
 
 MAX_PROGRESS = 30
 
+CONTEXT_MAX_CHARS = 120000
+FRAME = ("Project instructions loaded for you from the Claude Code harness. Follow them as "
+         "binding. You cannot run Claude skills as tools; read the listed files with your own tools.")
+
+
+def _chain(cwd):
+    """Directories from the filesystem root down to cwd."""
+    cwd = Path(cwd).resolve()
+    return list(reversed([cwd] + list(cwd.parents)))
+
+
+def _read(path):
+    try:
+        return Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def _imports(path, text, seen, depth=0):
+    """Files named by simple `@path` lines (whole line, no spaces), followed to a small depth."""
+    found = []
+    if depth >= 4:
+        return found
+    for line in text.splitlines():
+        line = line.strip()
+        if not re.match(r"^@\S+$", line):
+            continue
+        target = Path(os.path.expanduser(line[1:]))
+        if not target.is_absolute():
+            target = Path(path).parent / target
+        target = target.resolve()
+        if target in seen or not target.is_file():
+            continue
+        body = _read(target)
+        if body is None:
+            continue
+        seen.add(target)
+        found.append((str(target), body))
+        found += _imports(target, body, seen, depth + 1)
+    return found
+
+
+def claude_md_files(cwd, home):
+    """[(absolute path, text)] outermost to innermost, without duplicates."""
+    candidates = [Path(home) / ".claude" / "CLAUDE.md"]
+    for d in _chain(cwd):
+        candidates += [d / "CLAUDE.md", d / "CLAUDE.local.md"]
+    files, seen = [], set()
+    for c in candidates:
+        if not c.is_file():
+            continue
+        real = c.resolve()
+        if real in seen:
+            continue
+        text = _read(real)
+        if text is None:
+            continue
+        seen.add(real)
+        files.append((str(c.absolute() if c.is_symlink() else real), text))
+        files += _imports(real, text, seen)
+    return files
+
+
+def _frontmatter(text):
+    """name and description from a leading `---` block; handles folded/indented values."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    meta, key = {}, None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = re.match(r"^([A-Za-z_-]+):\s*(.*)$", line)
+        if m and not line.startswith(" "):
+            key = m.group(1)
+            meta[key] = m.group(2).strip()
+        elif key and line.strip():
+            meta[key] += " " + line.strip()
+    for k, v in meta.items():
+        meta[k] = " ".join(v.strip("|>-+ ").strip("\"'").split())
+    return meta
+
+
+def skills(cwd, home):
+    """([(name, description, SKILL.md path)], {folder: [reference file paths]})."""
+    roots, seen = [], set()
+    for base in [Path(home)] + _chain(cwd):
+        root = base / ".claude" / "skills"
+        if root.is_dir() and root.resolve() not in seen:
+            seen.add(root.resolve())
+            roots.append(root)
+    found, refs = [], {}
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            for name in sorted(filenames):
+                path = Path(dirpath) / name
+                if name == "SKILL.md":
+                    meta = _frontmatter(_read(path) or "")
+                    found.append((meta.get("name") or Path(dirpath).name,
+                                  meta.get("description", ""), str(path)))
+                elif name.endswith(".md") and not name.startswith("."):
+                    refs.setdefault(dirpath, []).append(str(path))
+    return found, refs
+
+
+def memory_index(cwd, home):
+    """(path, text) of this project's MEMORY.md index, if Claude Code has written one."""
+    base = Path(home) / ".claude" / "projects"
+    cwd = str(Path(cwd).resolve())
+    for slug in (cwd.replace("/", "-"), re.sub(r"[^A-Za-z0-9]", "-", cwd)):
+        path = base / slug / "memory" / "MEMORY.md"
+        text = _read(path) if path.is_file() else None
+        if text is not None:
+            return str(path), text
+    return None
+
+
+def _render(files, replaced, found, refs, memory, note):
+    parts = [FRAME]
+    if files:
+        parts.append("## Project instructions (CLAUDE.md files, outermost first)")
+        if note:
+            parts.append(note)
+        for i, (path, text) in enumerate(files):
+            if i in replaced:
+                parts.append(f"### {path}\n(omitted for size, {len(text)} chars: read this file yourself)")
+            else:
+                parts.append(f"### {path}\n{text.strip()}")
+    if found:
+        lines = ["## Skills available (read the file before using one)"]
+        for name, desc, path in found:
+            lines.append(f"- {name}: {desc[:200] or '(no description)'} [{path}]")
+        if refs:
+            lines.append("\nReference files (read when a skill points to them):")
+            for folder in sorted(refs):
+                lines.append(f"{folder}/")
+                lines += [f"  {p}" for p in refs[folder]]
+        parts.append("\n".join(lines))
+    if memory:
+        parts.append(f"## Memory index\n### {memory[0]}\n{memory[1].strip()}")
+    return "\n\n".join(parts) + "\n"
+
+
+def build_context(cwd=None, home=None, max_chars=None):
+    """The preamble for agy, and its stats. Empty text when there is nothing to pass on."""
+    cwd = cwd or os.getcwd()
+    home = home or str(Path.home())
+    if max_chars is None:
+        max_chars = int(os.environ.get("CR_AGY_CONTEXT_MAX_CHARS") or CONTEXT_MAX_CHARS)
+    files = claude_md_files(cwd, home)
+    found, refs = skills(cwd, home)
+    stats = {"claude_md": len(files), "skills": len(found), "chars": 0, "replaced": 0}
+    if not files and not found:
+        return "", stats
+    memory = memory_index(cwd, home)
+    replaced, note = set(), ""
+    text = _render(files, replaced, found, refs, memory, note)
+    # Over the cap: swap the largest CLAUDE.md files for a pointer, one at a time.
+    order = sorted(range(len(files)), key=lambda i: -len(files[i][1]))
+    while len(text) > max_chars and len(replaced) < len(order):
+        replaced.add(order[len(replaced)])
+        names = ", ".join(files[i][0] for i in sorted(replaced))
+        note = (f"Note: context cap of {max_chars} chars exceeded; these files are not inlined, "
+                f"read them yourself: {names}")
+        text = _render(files, replaced, found, refs, memory, note)
+    stats.update(chars=len(text), replaced=len(replaced))
+    return text, stats
+
+
+def context_line(stats):
+    return (f"context: {stats['claude_md']} CLAUDE.md, {stats['skills']} skills, "
+            f"~{stats['chars'] / 4000:.1f}k tokens (chars/4)"
+            + (f", {stats['replaced']} CLAUDE.md pointed to, not inlined" if stats["replaced"] else ""))
+
+
+def bare_requested(flag=False):
+    return flag or os.environ.get("CR_AGY_BARE") == "1"
+
 
 def describe(step):
     """One short line for a tool step: the tool and the first thing it was given."""
@@ -83,7 +263,7 @@ def describe(step):
     return f"{step.get('tool_name') or info.get('name') or 'tool'} {detail[:70]}".rstrip()
 
 
-def run(task, model, effort=None, timeout=0, progress=print):
+def run(task, model, effort=None, timeout=0, progress=print, preamble=""):
     """Run agy, reporting each tool step as it happens, and return its final result."""
     cmd = ["agy", "--model", model, "--output-format", "stream-json"]
     if os.environ.get("CR_YOLO", "1") == "1":
@@ -94,7 +274,7 @@ def run(task, model, effort=None, timeout=0, progress=print):
         cmd += ["--effort", effort]
     if timeout:
         cmd += ["--print-timeout", f"{timeout}s"]
-    cmd += ["-p", task]
+    cmd += ["-p", f"{preamble}\n## Task\n{task}" if preamble else task]
     started = time.time()
     result, shown, hidden, other = {}, 0, 0, []
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as proc:
@@ -158,6 +338,10 @@ def main(argv=None):
     p.add_argument("--effort")
     p.add_argument("--timeout", type=int, default=0, help="seconds; 0 waits for the turn")
     p.add_argument("--list", action="store_true", help="list models and how tiers resolve")
+    p.add_argument("--bare", action="store_true",
+                   help="no project context preamble (also CR_AGY_BARE=1)")
+    p.add_argument("--show-context", action="store_true",
+                   help="print the preamble that would be sent, and exit")
     p.add_argument("--refresh", action="store_true", help="re-read the model list")
     argv, dropped = strip_background(sys.argv[1:] if argv is None else argv)
     if dropped:
@@ -171,6 +355,18 @@ def main(argv=None):
     if junk:
         print(f"  (note: ignored unknown arguments: {' '.join(junk)})", file=sys.stderr)
 
+    if a.show_context:
+        if bare_requested(a.bare):
+            print("(bare: no preamble)")
+            return 0
+        text, stats = build_context()
+        print(context_line(stats), file=sys.stderr)
+        try:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
     models = list_models(a.refresh)
     if a.list:
         for m in models:
@@ -187,7 +383,12 @@ def main(argv=None):
         p.error("no task given")
     model = pick(a.tier, models)
     print(f"[agy {model}] started", flush=True)
-    result = run(task, model, a.effort, a.timeout, lambda m: print(m, flush=True))
+    preamble = ""
+    if not bare_requested(a.bare):
+        preamble, stats = build_context()
+        if preamble:
+            print(context_line(stats), flush=True)
+    result = run(task, model, a.effort, a.timeout, lambda m: print(m, flush=True), preamble)
     print(f"[agy {model} · {result.get('status', '?')} · {result.get('duration_seconds') or 0:.0f}s]")
     print((result.get("response") or "").strip())
     return 0 if result.get("status") == "SUCCESS" else 1

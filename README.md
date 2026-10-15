@@ -38,6 +38,22 @@ cr dash                  # live dashboard for a side pane
 cr report --json         # everything above as JSON, for your own dashboards (versioned schema)
 ```
 
+## Project context for agy
+
+`cr agy` prepends the project context Claude Code would have loaded to the task, under a
+`## Task` header: every `CLAUDE.md` (and `CLAUDE.local.md`) from `~/.claude` and from the
+filesystem root down to the current directory, inlined, with simple `@path` import lines
+followed; a list of all skills (name, description, path, plus reference `.md` files) from
+`~/.claude/skills` and each `.claude/skills` on that path, which agy reads itself; and the
+project's `~/.claude/projects/<cwd with / as ->/memory/MEMORY.md` index. Nothing is added
+when there are no `CLAUDE.md` files and no skills. A line such as
+`context: 3 CLAUDE.md, 41 skills, ~9.2k tokens (chars/4)` shows what it costs.
+
+- `--bare` or `CR_AGY_BARE=1` skips the preamble.
+- `--show-context` prints the preamble and exits without calling agy.
+- `CR_AGY_CONTEXT_MAX_CHARS` (default `120000`): above it, the largest `CLAUDE.md` files are
+  replaced by a path pointer, and the preamble says so.
+
 ## Seeing the routing
 
 - **In the chat:** each prompt shows a notice such as
@@ -123,8 +139,8 @@ This is our reading of the terms, not legal advice.
 - `cr usage` shows token counts, not how much of your plan is left. Neither CLI reports that.
 - Routing is the front desk's judgement, so it can misjudge; it escalates a tier when a
   cheap route's result is wrong, and the route line tells you what it chose.
-- An agy hand-off doesn't see your Claude Code skills or run your Claude hooks. MCP
-  servers you add to agy (`agy mcp add`) are available to it.
+- An agy hand-off can't run your Claude Code skills as tools or run your Claude hooks. MCP
+  servers you add to agy (`agy mcp add`) are available to it. See "Project context for agy".
 
 ## Settings
 
