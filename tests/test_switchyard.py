@@ -95,6 +95,16 @@ class Tiers(unittest.TestCase):
         self.assertEqual(agy.pick("fast", future), "gemini-5-flash-lite-medium")
         self.assertEqual(agy.pick("strong", future), "gemini-5-pro-high")
 
+    def test_stray_background_flag_is_dropped_not_fatal(self):
+        cases = [
+            (["--tier", "opus", "--run_in_background", "do it"], ["--tier", "opus", "do it"]),
+            (["do it", "--run_in_background", "true"], ["do it"]),
+            (["--background=true", "do it"], ["do it"]),
+            (["do it"], ["do it"]),
+        ]
+        for argv, want in cases:
+            self.assertEqual(agy.strip_background(argv)[0], want, argv)
+
     def test_unknown_tier_fails_clearly(self):
         with self.assertRaises(SystemExit):
             agy.pick("opus", ["gemini-3.8-flash-low"])

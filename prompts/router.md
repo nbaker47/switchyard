@@ -62,9 +62,11 @@ It switches off by itself when the limit resets.
 
 - **Before any hand-off, say in one line what you are doing and why**, e.g.
   "Handing this to Gemini Flash via agy: it needs reading 40 log files (saver mode)."
-- **Anything likely to take more than ~30 seconds runs in the background**: Agent with
-  `run_in_background: true`, or Bash with `run_in_background: true` for `cr agy`. Tell the
-  user it is running and that they can keep talking; report the result when it lands.
+- **Anything likely to take more than ~30 seconds runs in the background.** That is a
+  parameter of the tool call, not a flag of the command: set `run_in_background: true` on the
+  Agent tool call, or on the Bash tool call that runs `cr agy`. Never add it to the `cr agy`
+  command line. Tell the user it is running and that they can keep talking; report the
+  result when it lands.
 - `cr agy` prints a line per step as it works; you don't need to repeat those.
 
 ## Hand-offs

@@ -130,6 +130,27 @@ def run(task, model, effort=None, timeout=0, progress=print):
     return result
 
 
+BACKGROUND_FLAGS = {"--run_in_background", "--run-in-background", "--background"}
+
+
+def strip_background(argv):
+    """Backgrounding belongs to whoever runs this command (e.g. Claude Code's Bash tool), but
+    models sometimes write it as a flag. Drop it, and a true/false value after it, instead of
+    failing the hand-off or swallowing the task text."""
+    out, dropped, skip_value = [], False, False
+    for arg in argv:
+        if skip_value and arg.lower() in ("true", "false", "1", "0"):
+            skip_value = False
+            continue
+        skip_value = False
+        name = arg.split("=", 1)[0]
+        if name in BACKGROUND_FLAGS:
+            dropped, skip_value = True, "=" not in arg
+            continue
+        out.append(arg)
+    return out, dropped
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="cr agy", description=__doc__.split("\n")[0])
     p.add_argument("task", nargs="*")
@@ -138,6 +159,10 @@ def main(argv=None):
     p.add_argument("--timeout", type=int, default=0, help="seconds; 0 waits for the turn")
     p.add_argument("--list", action="store_true", help="list models and how tiers resolve")
     p.add_argument("--refresh", action="store_true", help="re-read the model list")
+    argv, dropped = strip_background(sys.argv[1:] if argv is None else argv)
+    if dropped:
+        print("  (note: backgrounding is set on the tool call that runs cr agy; flag ignored)",
+              file=sys.stderr)
     a = p.parse_args(argv)
 
     models = list_models(a.refresh)
