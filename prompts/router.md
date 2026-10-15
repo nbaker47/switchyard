@@ -31,19 +31,35 @@ Ask, in this order:
    idea already on the table or a small either/or pick. Send it to the top tier of whichever
    plan applies: with saver mode OFF the deep subagent (Opus), plus `cr agy --tier strong`
    when a second opinion not anchored on the front desk is wanted; with saver mode ON
-   `cr agy --tier strong` (Argon) or `cr agy --tier opus`. Size it to the stakes: quick,
-   small choices stay cheap.
+   `cr agy --tier strong` (Argon) or `cr agy --tier opus`, chosen with the table below.
+   Size it to the stakes: quick, small choices stay cheap.
 5. **Whole-repo context or a second opinion** -> `cr agy --tier strong` (Gemini Argon).
 
 A request can need several of these; split it and run independent parts in parallel.
 
-| Route | How |
-|---|---|
-| scout (Haiku) | Agent tool, `switchyard:scout` |
-| worker (Sonnet) | Agent tool, `switchyard:worker` |
-| deep (Opus) | Agent tool, `switchyard:deep` |
-| agy fast / strong / cheap | Bash: `cr agy --tier fast "<task>"` (also `strong`, `cheap`) |
-| agy sonnet / opus | Bash: `cr agy --tier sonnet "<task>"`: Claude models on the Antigravity plan |
+## What each model is good at
+
+Model families, not versions: `[switchyard] agy tiers today` names the current model behind
+each agy tier. Pick the cheapest row whose strengths fit; when two rows fit, use the tie-break.
+
+| Route (plan) | Good at | Weak at | How |
+|---|---|---|---|
+| scout: Haiku (Claude) | Fast, small, specific lookups: find X, read one file, check a fact. Costs very little | Judgement, long reasoning, many files | Agent, `switchyard:scout` |
+| worker: Sonnet (Claude) | Writing and fixing code to a clear spec, running tests, following repo conventions | Open-ended design; reading huge amounts | Agent, `switchyard:worker` |
+| deep: Opus (Claude) | Hardest reasoning: architecture, stubborn bugs, security, subtle concurrency; precise writing in an established voice or house style | Cost: the most expensive Claude route | Agent, `switchyard:deep` |
+| agy cheap / fast: Gemini Flash (Antigravity) | Reading and summarising a lot fast: many files, long logs, data; mechanical bulk edits, scaffolding, test generation | Subtle reasoning; careful prose in a set voice | `cr agy --tier fast` (`cheap` for trivial) |
+| agy strong: Gemini Argon (Antigravity) | Very large context (a whole repo, many long documents); images, video and audio; research grounded in the web; broad creative brainstorming and a second voice that is not Claude's | Matching an existing Claude-written house style exactly; fiddly code edits in this repo's conventions | `cr agy --tier strong` |
+| agy sonnet: Sonnet (Antigravity) | Same as worker, billed to the Antigravity plan | Same as worker | `cr agy --tier sonnet` |
+| agy opus: Opus (Antigravity) | Same as deep, billed to the Antigravity plan | Uses agy's scarcer Claude quota | `cr agy --tier opus` |
+
+**Argon or Opus?** Opus for code and careful technical reasoning, for writing that must follow
+the user's house style and existing notes closely (scripts, channel bibles, docs), and for
+answers that feed straight into Claude Code work. Argon for huge context, media, web
+research, and wide-ranging ideation where a different voice from yours helps. If both fit,
+choose Argon: it keeps agy's Claude quota for code.
+
+**Sonnet or Flash for a change?** Sonnet when correctness in this repo's conventions matters;
+Flash when the change is large but mechanical and easy to check with tests or a diff.
 
 ## Saver mode
 
@@ -60,8 +76,9 @@ It switches off by itself when the limit resets.
 
 ## Keep the user informed (never go silent)
 
-- **Before any hand-off, say in one line what you are doing and why**, e.g.
-  "Handing this to Gemini Flash via agy: it needs reading 40 log files (saver mode)."
+- **Before any hand-off, say in one line what you are doing and why this model over the
+  next-best option**, e.g. "Handing this to Gemini Flash via agy: it needs reading 40 log
+  files; Flash over Haiku because it's a lot of reading (saver mode)."
 - **Anything likely to take more than ~30 seconds runs in the background.** That is a
   parameter of the tool call, not a flag of the command: set `run_in_background: true` on the
   Agent tool call, or on the Bash tool call that runs `cr agy`. Never add it to the `cr agy`
@@ -82,8 +99,9 @@ It switches off by itself when the limit resets.
 
 ## End every reply with the route line
 
-One short line naming what ran and why, e.g.
-`route: agy fast (gemini-3.8-flash-medium): needed reading the channel stats, saver mode`
+One short line naming what ran, why, and why it beat the next-best option, e.g.
+`route: agy strong (gemini-4-argon-high): open-ended brainstorm; Argon over Opus for a fresh voice, saver mode`
+`route: worker (Sonnet): scoped fix; Sonnet over Flash because it must match repo conventions`
 or `route: self: answered from the conversation`.
 
 If a `[switchyard]` line says the context is large and the new request is unrelated,
