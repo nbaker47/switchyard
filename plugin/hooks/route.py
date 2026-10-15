@@ -63,7 +63,7 @@ def agy_tiers():
 
 BROWSER_RULE = (
     'Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude '
-    'subagent, in saver mode too, because agy has no browser and none of our hooks. If the Claude plan is too full for it, stop and tell the user instead of handing it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.'
+    'subagent, in saver mode too, because agy has no browser and none of our hooks. Below 95% of the plan limit, do the browser work on the cheapest Claude route that can do it (a Sonnet subagent for the browser steps, not Opus) and say the plan percentage in one line first; at 95% or more, stop and tell the user instead of starting it, and never hand it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.'
 )
 
 

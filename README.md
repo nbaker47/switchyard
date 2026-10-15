@@ -111,7 +111,7 @@ conversation again for the new model. So switchyard routes **tasks**, not messag
    a tiny lookup may still use Haiku. It switches off when the window
    resets. The usage figures come from Claude Code's status line, so they are as fresh as
    your last `cr` session. Browser work (Claude in Chrome, Google Flow, AI Studio, Meta
-   Business Suite, YouTube Studio, Buffer/TikTok, `podvid live`) never goes to agy, even in saver mode; agy has no browser.
+   Business Suite, YouTube Studio, Buffer/TikTok, `podvid live`) never goes to agy, even in saver mode; agy has no browser. Browser work is blocked at 95% of the plan limit (below that it runs on the cheapest Claude route that can do it).
 
 **No hard-coded model list.** agy tiers are matched by family name (flash, argon, pro, opus,
 sonnet) and compute level against what `agy models` returns for your account. Claude tiers
