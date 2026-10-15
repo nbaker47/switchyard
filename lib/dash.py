@@ -1,10 +1,11 @@
 """Live dashboard for a cr session: requests feed, provider limits, saving from routing.
 
-    cr dash [--session ID] [--once] [--interval 2] [--width N] [--height N]
+    cr dash [--session ID] [--once] [--interval 2] [--width N] [--height N] [--demo]
 
 Run it in a split pane next to `cr`. Without --session it follows whichever cr session
 most recently received a prompt. Narrow panes (under 100 columns) stack everything in one
 column; wide terminals put the feed on the left and limits and savings on the right.
+--demo renders made-up sample data instead of a real session (used for the README images).
 Press q or Ctrl+C to quit.
 """
 import argparse
@@ -18,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import quota  # noqa: E402
-from ledger import CACHE, Ledger, latest_session, short  # noqa: E402
+from ledger import CACHE, Ledger, cost, latest_session, opus_cost, short  # noqa: E402
 
 B, DIM, CYAN, GREEN, YELLOW, RED, MAGENTA, R = ("\033[1m", "\033[2m", "\033[36m", "\033[32m",
                                                  "\033[33m", "\033[31m", "\033[35m", "\033[0m")
@@ -139,9 +140,9 @@ def feed_rows(requests, fw, rows, now):
     return out
 
 
-def limits_lines(w, status, summary, now):
+def limits_lines(w, status, summary, now, q=None):
     """One bar per window per plugged-in provider, plus saver mode."""
-    q = quota.latest() or (status.get("rate_limits") or {})
+    q = q or quota.latest() or (status.get("rate_limits") or {})
     lines = []
     active, pct = quota.saver(q if q else None) if q else (False, None)
     on = f"{RED}{B}ON{R}" if active else f"{DIM}OFF{R}"
@@ -201,15 +202,71 @@ def tokens_lines(w, s, rows):
     return out
 
 
-def render(sid, transcript, width, height=40):
+def demo_data(now):
+    """Made-up (summary, status) with a populated feed, limits and savings, for screenshots."""
+    # (seconds ago, prompt, [(route, provider, model, tokens)], desk tokens, desk model)
+    script = [
+        (2400, "list the open todos in src", [("haiku", "Claude", "claude-haiku-4-5", 8300)], 800, "sonnet"),
+        (2100, "write a migration rollback script", [("sonnet", "Claude", "claude-sonnet-5-5", 41700)], 3300, "sonnet"),
+        (1800, "compare two caching approaches", [("agy", "Antigravity", "gemini-3.8-pro-high", 36400)], 2200, "sonnet"),
+        (1500, "explain the build pipeline", [("haiku", "Claude", "claude-haiku-4-5", 15200)], 1200, "sonnet"),
+        (1260, "plan the database migration", [("opus", "Claude", "claude-opus-5", 58900)], 5900, "opus"),
+        (960, "tidy the readme headings", [("haiku", "Claude", "claude-haiku-4-5", 9800)], 900, "sonnet"),
+        (540, "brainstorm launch plan", [("agy", "Antigravity", "gemini-3.8-pro-high", 61200)], 3100, "sonnet"),
+        (420, "rename config keys across the repo", [("haiku", "Claude", "claude-haiku-4-5", 28400)], 2400, "sonnet"),
+        (330, "summarise the logs folder", [("agy", "Antigravity", "gemini-3.8-flash-medium", 47300)], 1800, "sonnet"),
+        (240, "fix failing auth test", [("sonnet", "Claude", "claude-sonnet-5-5", 96800)], 5200, "opus"),
+        (150, "draft release notes for v0.4", [("agy", "Antigravity", "gemini-3.8-flash-medium", 22100)], 1500, "sonnet"),
+        (70, "review the retry logic for races", [("opus", "Claude", "claude-opus-5", 74500)], 6800, "opus"),
+        (12, "add tests for the date parser", [("haiku", "Claude", "claude-haiku-4-5", 19600)], 2100, "sonnet"),
+    ]
+    by, reqs, actual, baseline = {}, [], 0.0, 0.0
+
+    def add(prov, model, tok):
+        c = by.setdefault(f"{prov}|{model}", dict.fromkeys(("input", "output", "cache_read", "cache_write"), 0))
+        c["input"] += tok // 5
+        c["output"] += tok // 20
+        c["cache_read"] += tok - tok // 5 - tok // 20
+        return {"input": tok // 5, "output": tok // 20, "cache_read": tok - tok // 5 - tok // 20, "cache_write": 0}
+
+    for ago, prompt, hands, desk_tok, desk_model in script:
+        ts = now - ago
+        cost_ = opus = tokens = 0.0
+        hs = []
+        for route, prov, model, tok in hands:
+            c = add(prov, model, tok)
+            hc = 0.0 if prov == "Antigravity" else cost(model, c)
+            cost_, opus, tokens = cost_ + hc, opus + opus_cost(c), tokens + tok
+            hs.append({"route": route, "provider": prov, "model": model, "tokens": tok})
+        dm = "claude-opus-5" if desk_model == "opus" else "claude-sonnet-5-5"
+        c = add("Claude", dm, desk_tok)
+        cost_, opus, tokens = cost_ + cost(dm, c), opus + opus_cost(c), tokens + desk_tok
+        actual, baseline = actual + cost_, baseline + opus
+        reqs.append({"ts": ts, "end": ts + 40 if ago > 30 else now, "prompt": prompt, "handoffs": hs,
+                     "route": ", ".join(h["route"] for h in hs), "tokens": int(tokens), "opus": opus,
+                     "saved_pct": 100 * (opus - cost_) / opus if opus else 0.0,
+                     "desk": {"models": [desk_model]}})
+    s = {"by": by, "actual": actual, "baseline": baseline, "saved": baseline - actual,
+         "saved_pct": 100 * (baseline - actual) / baseline, "requests": reqs}
+    status = {"cwd": "~/projects/demo-app", "rate_limits": {
+        "five_hour": {"used_percentage": 42, "resets_at": now + 2 * 3600 + 13 * 60},
+        "seven_day": {"used_percentage": 71, "resets_at": now + 3 * 86400 + 4 * 3600}}}
+    return s, status
+
+
+def render(sid, transcript, width, height=40, demo=False):
     width, height = max(1, width), max(1, height)
     now = time.time()
-    s = Ledger(sid, transcript).refresh().summary()
-    try:
-        status = json.loads((CACHE / f"status-{sid}.json").read_text())
-    except (OSError, ValueError):
-        status = {}
-    cwd = status.get("cwd") or next((p.get("cwd") for p in reversed(Ledger(sid, None).prompts())), "")
+    if demo:
+        sid = "demo0000"
+        s, status = demo_data(now)
+    else:
+        s = Ledger(sid, transcript).refresh().summary()
+        try:
+            status = json.loads((CACHE / f"status-{sid}.json").read_text())
+        except (OSError, ValueError):
+            status = {}
+    cwd = status.get("cwd") or ("" if demo else next((p.get("cwd") for p in reversed(Ledger(sid, None).prompts())), ""))
     head = f"{B}{CYAN}⇄ switchyard{R}  {DIM}{sid[:8]}  {cwd or ''}{R}"
     reqs = s["requests"]
     body = max(1, height - 2)  # header line, and keep the last row free so nothing scrolls
@@ -217,7 +274,7 @@ def render(sid, transcript, width, height=40):
     if width >= WIDE:
         rw = 62 if width >= 160 else 50
         lw = width - rw - 3
-        right = [header(rw, "Limits")] + limits_lines(rw, status, s, now) + [""]
+        right = [header(rw, "Limits")] + limits_lines(rw, status, s, now, status.get("rate_limits") if demo else None) + [""]
         right += [header(rw, "Saved by routing")] + saved_lines(rw, s) + [""]
         right += [header(rw, "Tokens")] + tokens_lines(rw, s, body - len(right) - 1)
         left = [header(lw, "Requests")]
@@ -227,7 +284,7 @@ def render(sid, transcript, width, height=40):
         lines = [pad(head, width)] + [f"{pad(a, lw)} {DIM}│{R} {pad(b, rw)}"
                                       for a, b in zip(left, right)]
     else:
-        panels = [header(width, "Limits")] + limits_lines(width, status, s, now)
+        panels = [header(width, "Limits")] + limits_lines(width, status, s, now, status.get("rate_limits") if demo else None)
         panels += [header(width, "Saved by routing")] + saved_lines(width, s)
         feed_h = body - 1 - len(panels)
         if feed_h < 3:  # too short for everything: keep the feed, drop panels from the bottom
@@ -243,6 +300,8 @@ def render(sid, transcript, width, height=40):
 # ---- terminal loop ----
 
 def _screen(a, cols, rows):
+    if a.demo:
+        return render("demo0000", None, cols, rows, demo=True)
     sid, transcript = (a.session, None) if a.session else latest_session()
     if a.session:
         try:
@@ -286,6 +345,7 @@ def main(argv=None):
     p.add_argument("--interval", type=float, default=2.0)
     p.add_argument("--width", type=int, help="override terminal width (for testing)")
     p.add_argument("--height", type=int, help="override terminal height (for testing)")
+    p.add_argument("--demo", action="store_true", help="show made-up sample data")
     a = p.parse_args(argv)
 
     def size():

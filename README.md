@@ -38,6 +38,21 @@ cr dash                  # live dashboard for a side pane
 cr report --json         # everything above as JSON, for your own dashboards (versioned schema)
 ```
 
+## Dashboard
+
+`cr dash` is a live terminal dashboard for a side pane. Narrow panes stack everything in one
+column; wide terminals put the feed on the left and the panels on the right.
+
+![cr dash in a narrow side pane: requests feed, provider limits and saved by routing](docs/images/dash-sidebar.png)
+
+![cr dash in a wide terminal: requests feed on the left, limits, saved by routing and tokens on the right](docs/images/dash-wide.png)
+
+Run `cr dash` in a split pane next to `cr`. It shows three things: live requests (what each
+prompt was routed to, its tokens and how much it saved), provider limits (your 5-hour and 7-day
+Claude windows and saver mode), and saved by routing (what the same work would have cost on
+Opus alone). The screenshots use sample data (`cr dash --demo`); regenerate them with
+`python3 scripts/render_dash_images.py`.
+
 ## Project context for agy
 
 `cr agy` prepends the project context Claude Code would have loaded to the task, under a
