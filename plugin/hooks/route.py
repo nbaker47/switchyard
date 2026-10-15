@@ -85,7 +85,29 @@ def advise(prompt, transcript_path):
     return route, ctx, "\n".join(lines)
 
 
+def dry_run(prompts):
+    """`cr route "..."`: show the hint each prompt would get, and the model behind it."""
+    models = {"self": "front desk (CR_FRONT_MODEL, default sonnet)", "scout": "haiku",
+              "worker": "sonnet", "deep": "opus"}
+    for prompt in prompts:
+        route, why = classify(prompt)
+        model = models.get(route)
+        if model is None:  # an agy tier: resolve it against the live model list
+            lib = Path(__file__).resolve().parents[2] / "lib"
+            sys.path.insert(0, str(lib))
+            import agy
+            try:
+                model = "agy " + agy.pick(route.split("-")[1], agy.list_models())
+            except (SystemExit, OSError) as e:
+                model = f"agy (unavailable: {e})"
+        print(f"{route:<10} -> {model:<34} {why}   ← {prompt[:60]}")
+    return 0
+
+
 def main():
+    if sys.argv[1:2] == ["--dry-run"]:
+        prompts = sys.argv[2:] or [line.strip() for line in sys.stdin if line.strip()]
+        return dry_run(prompts)
     try:
         data = json.load(sys.stdin)
     except ValueError:
