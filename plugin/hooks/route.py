@@ -1,11 +1,12 @@
 """UserPromptSubmit hook: tell the front desk the facts it needs to route, and show the user
-one line about it.
+the live intake flow graph in the TUI.
 
 It does not guess a route. The front-desk model reads the request and decides, using the
 rules in prompts/router.md; it understands requests far better than keyword rules could, and
-it is reading the request anyway, so deciding there costs nothing extra. This hook only adds
-what that model cannot see for itself: how full the Claude plan is (and so whether saver
-mode is on), how large the conversation has grown, and which Antigravity models exist today.
+it is reading the request anyway, so deciding there costs nothing extra. This hook adds
+what that model cannot see for itself: how full the Claude plan is (5h/7d usage + burn-rate
+pace), how full the Antigravity pools are (Claude vs Gemini), how large the conversation has
+grown, and which Antigravity models exist today.
 Each prompt is appended to routes.jsonl for `cr usage`, `cr dash` and `cr report`.
 """
 import json
@@ -15,11 +16,13 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+import compress  # noqa: E402
+import flow  # noqa: E402
 import quota  # noqa: E402
 
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "switchyard"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "switchyard"
-CLEAR_AT = int(os.environ.get("CR_CLEAR_AT", "120000"))
+CLEAR_AT = int(os.environ.get("CR_CLEAR_AT", "50000"))
 WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "7-day"}
 
 
@@ -69,7 +72,7 @@ BROWSER_RULE = (
 
 AGY_FIRST = (
     "Sonnet/Opus-class work (scoped changes, design, hard bugs, brainstorming) goes to "
-    "`cr agy --tier sonnet` / `--tier opus` (or `--tier strong`) by default, saver mode or not. "
+    "`cr agy --tier sonnet` / `--tier opus` (or `--tier strong` / `--tier auto`) by default, saver mode or not. "
     "Use the worker/deep subagents only for work that needs browser integration or Claude-only "
     "tooling (Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, "
     "podvid live, computer-use, Claude-only MCP connectors, Agent Teams), or as the fallback if "
@@ -82,19 +85,33 @@ def saver_state(q=None):
     active, pct = quota.saver(q)
     win = quota.window(q)
     resets = (q.get(win) or {}).get("resets_at") if win else None
-    return {"active": active, "pct": pct, "window": WINDOW_NAMES.get(win, win), "resets": resets}
+    pace = quota.pace_status(q)
+    if not active and pace.get("hot"):
+        active = True
+        pct = pace["used"]
+        win = pace["window"]
+        resets = (q.get(win) or {}).get("resets_at") if win else None
+    return {
+        "active": active,
+        "pct": pct,
+        "window": WINDOW_NAMES.get(win, win),
+        "resets": resets,
+        "pace": pace,
+    }
 
 
-def facts(transcript_path, saver, tiers):
+def facts(transcript_path, saver, tiers, balance=None):
     """The context added to the prompt for the front desk."""
     ctx = context_tokens(transcript_path) if transcript_path else 0
     lines = [f"[switchyard] Context so far: ~{ctx // 1000}K tokens."]
     lines.append("[switchyard] Routing: " + AGY_FIRST)
+    lines.append("[switchyard] " + compress.COD_WIRE_RULES)
     if saver["active"]:
-        when = time.strftime("%a %H:%M", time.localtime(saver["resets"])) if saver["resets"] else "its reset"
+        when = time.strftime("%a %H:%M", time.localtime(saver["resets"])) if saver.get("resets") else "its reset"
+        pace_note = f" ({saver['pace']['reason']})" if saver.get("pace", {}).get("hot") else ""
         lines.append(
             f"[switchyard] SAVER MODE ON: the Claude plan's {saver['window']} limit is at "
-            f"{saver['pct']:.0f}% (threshold {quota.SAVER_AT:.0f}%) until {when}. Any request that "
+            f"{saver['pct']:.0f}%{pace_note} (threshold {quota.SAVER_AT:.0f}%) until {when}. Any request that "
             "needs work (reading files or data, running commands, searching, editing, reasoning "
             "at length) goes to the Antigravity plan via `cr agy`, including what you would "
             "otherwise read or reason through yourself. Answer yourself only from what "
@@ -103,6 +120,19 @@ def facts(transcript_path, saver, tiers):
     elif saver["pct"] is not None:
         lines.append(f"[switchyard] Claude plan at {saver['pct']:.0f}% of its {saver['window']} limit; "
                      "saver mode off.")
+    if balance:
+        ac, ag = balance.get("agy_claude"), balance.get("agy_gemini")
+        if isinstance(ac, (int, float)) or isinstance(ag, (int, float)):
+            c_txt = f"Claude pool {ac:.0f}%" if isinstance(ac, (int, float)) else ""
+            g_txt = f"Gemini pool {ag:.0f}%" if isinstance(ag, (int, float)) else ""
+            pool_line = f"[switchyard] Antigravity pools: {', '.join(x for x in (c_txt, g_txt) if x)}."
+            if balance.get("shift_to_gemini"):
+                pool_line += (
+                    f" POOL SHIFT ACTIVE ({balance['shift_reason']}): `cr agy` automatically "
+                    "remaps `--tier opus` and `--tier sonnet` to Gemini Argon (`strong`) / Flash (`fast`) "
+                    "to balance your subscriptions. Prefer `--tier strong`, `--tier fast`, or `--tier auto`."
+                )
+            lines.append(pool_line)
     if tiers:
         lines.append("[switchyard] agy tiers today: " + ", ".join(f"{t}={m}" for t, m in tiers.items()) + ".")
     if ctx > CLEAR_AT:
@@ -112,19 +142,31 @@ def facts(transcript_path, saver, tiers):
     return ctx, "\n".join(lines)
 
 
-def notice(ctx, saver):
-    """The one line the user sees in the TUI for each prompt."""
-    parts = ["⇄ reading request"]
-    if saver["active"]:
-        parts.append(f"⛽ saver mode ({saver['window']} {saver['pct']:.0f}%)")
-    parts.append(f"ctx {ctx // 1000}K" + ("  ⚠ large, /clear if unrelated" if ctx > CLEAR_AT else ""))
-    return " · ".join(parts)
+def notice(ctx, saver, balance=None):
+    """The live intake flow graph line the user sees in the TUI for each prompt."""
+    return flow.intake_Banner(ctx, saver, balance=balance, clear_at=CLEAR_AT)
+
+
+def _reset_turn_state(session_id, prompt):
+    if not session_id:
+        return
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        (CACHE / f"turn-{session_id}.json").write_text(json.dumps({
+            "ts": time.time(),
+            "prompt": " ".join((prompt or "").split())[:120],
+            "reads": 0,
+            "bash": 0,
+        }))
+    except OSError:
+        pass
 
 
 def show_state():
     """`cr route`: what the front desk is told right now."""
     saver = saver_state()
-    _, text = facts(None, saver, agy_tiers())
+    bal = quota.pool_balance()
+    _, text = facts(None, saver, agy_tiers(), balance=bal)
     print(text.replace("[switchyard] ", ""))
     print("The front desk reads each request and picks the route itself; see prompts/router.md.")
     return 0
@@ -140,8 +182,10 @@ def main():
     prompt = data.get("prompt") or ""
     if prompt.lstrip().startswith("<task-notification>"):
         return 0  # a background job reporting back, not a request from the user
+    _reset_turn_state(data.get("session_id"), prompt)
     saver = saver_state()
-    ctx, text = facts(data.get("transcript_path"), saver, agy_tiers())
+    bal = quota.pool_balance()
+    ctx, text = facts(data.get("transcript_path"), saver, agy_tiers(), balance=bal)
     try:
         STATE.mkdir(parents=True, exist_ok=True)
         with open(STATE / "routes.jsonl", "a") as f:
@@ -153,7 +197,7 @@ def main():
         pass
     out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}
     if os.environ.get("CR_NOTICE", "1") == "1":
-        out["systemMessage"] = notice(ctx, saver)
+        out["systemMessage"] = notice(ctx, saver, balance=bal)
     print(json.dumps(out))
     return 0
 

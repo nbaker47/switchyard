@@ -2,9 +2,9 @@
 # cr - start Claude Code with switchyard's routing layered on top, for this session only.
 #
 #   cr [--safe] [any claude flags/args]   chat, with routing (yolo unless --safe)
-#   cr agy [--tier T] "task"              hand a task to the Antigravity CLI
-#   cr models                             list the models your agy login offers
-#   cr route "prompt"                     show the route a prompt would get (no model call)
+#   cr agy [--tier T] "task"              hand a task to the Antigravity CLI (T: auto|fast|cheap|strong|sonnet|opus)
+#   cr models                             list the models your agy login offers & active pool shifts
+#   cr route "prompt"                     show the route facts & 4-pool balance right now (no model call)
 #   cr usage [--days N]                   tokens per subscription and routes taken
 #   cr dash                               live dashboard: routing feed, tokens, saving
 #   cr report [--days N] --json           all of it as JSON, for other dashboards
@@ -44,16 +44,19 @@ for a in "$@"; do
 done
 [ "${CR_SAFE:-0}" = 1 ] && yolo=0
 
+export CR_FRONT_MODEL="${CR_FRONT_MODEL:-haiku}"
+export CR_AUTOCOMPACT="${CR_AUTOCOMPACT:-50k}"
+export CR_ROOT="$ROOT" CR_YOLO="$yolo"
+
 flags=(
-  --model "${CR_FRONT_MODEL:-sonnet}"
+  --model "$CR_FRONT_MODEL"
   --plugin-dir "$ROOT/plugin"
   --append-system-prompt-file "$ROOT/prompts/router.md"
-  --autocompact "${CR_AUTOCOMPACT:-160k}"
+  --autocompact "$CR_AUTOCOMPACT"
   --settings '{"statusLine":{"type":"command","command":"python3 \"$CR_ROOT/lib/statusline.py\"","padding":0}}'
 )
 [ "$yolo" = 1 ] && flags+=(--dangerously-skip-permissions)
 
-export CR_ROOT="$ROOT" CR_YOLO="$yolo"
 # Outside a cmux tab the session gets no cmux computer use (CMUX_CUA_* and its MCP come from cmux's claude shim).
 if [ -z "${CMUX_SURFACE_ID:-}" ] && [ -z "${CR_NO_CMUX_WARN:-}" ] && pgrep -x cmux >/dev/null 2>&1; then
   echo "cr: not inside a cmux tab, so this session has no cmux computer use (scheduled-task tooling). Run cr in a cmux tab, or set CR_NO_CMUX_WARN=1." >&2

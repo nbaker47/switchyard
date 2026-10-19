@@ -4,8 +4,8 @@ It runs your own, already signed-in `agy` in print mode. Your Antigravity login 
 read or forwarded. Models are never hard-coded: a tier is matched against the list that
 `agy models` returns for your account, so new models are picked up automatically.
 
-    cr agy [--tier fast|cheap|strong|opus|sonnet|<model id>] [--effort LEVEL] [--bare] "task"
-    cr agy --show-context
+    cr agy [--tier auto|fast|cheap|strong|opus|sonnet|<model id>] [--effort LEVEL] [--bare] "task"
+    cr agy --show-context [--compress]
     cr models
 """
 import argparse
@@ -16,6 +16,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import compress  # noqa: E402
+import flow  # noqa: E402
+import quota  # noqa: E402
 
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "switchyard"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "switchyard"
@@ -29,6 +34,16 @@ TIERS = {
     "strong": (["argon", "pro", "ultra"], ["high", "medium", "low"]),
     "opus": (["opus"], ["medium", "high", "low"]),
     "sonnet": (["sonnet"], ["medium", "high", "low"]),
+}
+
+DEEP_KEYWORDS = {
+    "architect", "architecture", "design", "brainstorm", "strategy", "security",
+    "race", "deadlock", "concurrency", "root-cause", "root", "stubborn", "complex",
+    "plan", "trade-off", "tradeoff", "redesign", "audit",
+}
+CODE_KEYWORDS = {
+    "fix", "bug", "implement", "refactor", "test", "tests", "failing", "edit",
+    "update", "patch", "add", "change", "build", "error", "crash", "feature",
 }
 
 
@@ -62,6 +77,54 @@ def pick(tier, models):
             if m.endswith("-" + level):
                 return m
     return family[0]
+
+
+def classify_task(task):
+    """Classify a task brief into ('cheap'|'fast'|'sonnet'|'opus'|'strong', reason) for --tier auto."""
+    words = {w for w in re.findall(r"[a-z0-9_-]{3,}", (task or "").lower())}
+    if words & DEEP_KEYWORDS:
+        if words & {"brainstorm", "ideate", "strategy", "research", "compare", "repo", "whole"}:
+            return "strong", "auto-triage: open-ended/broad reasoning → strong"
+        return "opus", "auto-triage: deep technical judgement → opus"
+    if words & CODE_KEYWORDS:
+        if words & {"bulk", "mechanical", "rename", "all", "format", "migration", "scaffold"}:
+            return "fast", "auto-triage: bulk/mechanical code change → fast"
+        return "sonnet", "auto-triage: scoped code change → sonnet"
+    if len(task or "") < 80:
+        return "cheap", "auto-triage: short lookup/check → cheap"
+    return "fast", "auto-triage: reading/summarising → fast"
+
+
+def resolve(tier, models, task="", pools=None, force_claude=False):
+    """Resolve `tier` (including `auto`) with live Antigravity pool balancing.
+    Returns `(model_id, effective_tier, remapped_from, reason)`.
+    """
+    orig_tier = tier
+    reason = f"tier {tier}"
+    if tier == "auto":
+        tier, reason = classify_task(task)
+        orig_tier = f"auto({tier})"
+
+    remapped_from = None
+    if not force_claude and os.environ.get("CR_AGY_FORCE_CLAUDE") != "1" and tier in ("opus", "sonnet"):
+        bal = quota.pool_balance(agy_pools=pools)
+        if bal.get("shift_to_gemini"):
+            agy_g = bal.get("agy_gemini") or 0
+            if tier == "opus":
+                new_tier = "strong"
+            else:
+                # For sonnet work: use Argon if Gemini pool has plenty of room (<40%), else Flash
+                new_tier = "strong" if agy_g < 40 else "fast"
+            try:
+                model = pick(new_tier, models)
+                remapped_from = orig_tier
+                reason = f"pool shift ({bal['shift_reason']}) · {tier}→{new_tier}"
+                return model, new_tier, remapped_from, reason
+            except SystemExit:
+                pass
+
+    model = pick(tier, models)
+    return model, tier, remapped_from, reason
 
 
 def log(record):
@@ -190,8 +253,9 @@ def memory_index(cwd, home):
     return None
 
 
-def _render(files, replaced, found, refs, memory, note):
-    parts = [FRAME]
+def _render(files, replaced, found, refs, memory, note, use_wire=False, omitted_skills=0):
+    frame = f"{FRAME}\n{compress.COD_WIRE_RULES}" if use_wire else FRAME
+    parts = [frame]
     if files:
         parts.append("## Project instructions (CLAUDE.md files, outermost first)")
         if note:
@@ -205,6 +269,8 @@ def _render(files, replaced, found, refs, memory, note):
         lines = ["## Skills available (read the file before using one)"]
         for name, desc, path in found:
             lines.append(f"- {name}: {desc[:200] or '(no description)'} [{path}]")
+        if omitted_skills:
+            lines.append(f"- (+{omitted_skills} other skills omitted for token efficiency; pass --full-context to list all)")
         if refs:
             lines.append("\nReference files (read when a skill points to them):")
             for folder in sorted(refs):
@@ -216,20 +282,34 @@ def _render(files, replaced, found, refs, memory, note):
     return "\n\n".join(parts) + "\n"
 
 
-def build_context(cwd=None, home=None, max_chars=None):
-    """The preamble for agy, and its stats. Empty text when there is nothing to pass on."""
+def build_context(cwd=None, home=None, max_chars=None, task=None, use_compress=False):
+    """The preamble for agy, and its stats. Empty text when there is nothing to pass on.
+    When `use_compress=True`, applies Caveman/TOON markdown compression and task-based skill pruning.
+    """
     cwd = cwd or os.getcwd()
     home = home or str(Path.home())
     if max_chars is None:
         max_chars = int(os.environ.get("CR_AGY_CONTEXT_MAX_CHARS") or CONTEXT_MAX_CHARS)
     files = claude_md_files(cwd, home)
     found, refs = skills(cwd, home)
-    stats = {"claude_md": len(files), "skills": len(found), "chars": 0, "replaced": 0}
+    total_skills = len(found)
+    stats = {"claude_md": len(files), "skills": total_skills, "chars": 0, "replaced": 0}
     if not files and not found:
         return "", stats
     memory = memory_index(cwd, home)
+    raw_text = _render(files, set(), found, refs, memory, "")
+    raw_chars = len(raw_text)
+
+    omitted_skills = 0
+    if use_compress and os.environ.get("CR_AGY_FULL_CONTEXT") != "1":
+        files = [(p, compress.compress_markdown(t, task=task or "")) for p, t in files]
+        if memory:
+            memory = (memory[0], compress.compress_markdown(memory[1]))
+        found, refs, omitted_skills = compress.filter_skills(found, refs, task=task or "")
+
     replaced, note = set(), ""
-    text = _render(files, replaced, found, refs, memory, note)
+    text = _render(files, replaced, found, refs, memory, note,
+                   use_wire=use_compress, omitted_skills=omitted_skills)
     # Over the cap: swap the largest CLAUDE.md files for a pointer, one at a time.
     order = sorted(range(len(files)), key=lambda i: -len(files[i][1]))
     while len(text) > max_chars and len(replaced) < len(order):
@@ -237,15 +317,23 @@ def build_context(cwd=None, home=None, max_chars=None):
         names = ", ".join(files[i][0] for i in sorted(replaced))
         note = (f"Note: context cap of {max_chars} chars exceeded; these files are not inlined, "
                 f"read them yourself: {names}")
-        text = _render(files, replaced, found, refs, memory, note)
+        text = _render(files, replaced, found, refs, memory, note,
+                       use_wire=use_compress, omitted_skills=omitted_skills)
     stats.update(chars=len(text), replaced=len(replaced))
+    if use_compress:
+        stats.update(raw_chars=raw_chars, saved_chars=max(0, raw_chars - len(text)),
+                     omitted_skills=omitted_skills)
     return text, stats
 
 
 def context_line(stats):
-    return (f"context: {stats['claude_md']} CLAUDE.md, {stats['skills']} skills, "
+    base = (f"context: {stats['claude_md']} CLAUDE.md, {stats['skills']} skills, "
             f"~{stats['chars'] / 4000:.1f}k tokens (chars/4)"
             + (f", {stats['replaced']} CLAUDE.md pointed to, not inlined" if stats["replaced"] else ""))
+    if stats.get("saved_chars", 0) > 0 and stats.get("raw_chars", 0) > 0:
+        pct = round(100.0 * stats["saved_chars"] / stats["raw_chars"])
+        base += f" [compressed −{pct}%]"
+    return base
 
 
 def bare_requested(flag=False):
@@ -263,7 +351,7 @@ def describe(step):
     return f"{step.get('tool_name') or info.get('name') or 'tool'} {detail[:70]}".rstrip()
 
 
-def run(task, model, effort=None, timeout=0, progress=print, preamble=""):
+def run(task, model, effort=None, timeout=0, progress=print, preamble="", reason="", remapped_from=None):
     """Run agy, reporting each tool step as it happens, and return its final result."""
     cmd = ["agy", "--model", model, "--output-format", "stream-json"]
     if os.environ.get("CR_YOLO", "1") == "1":
@@ -289,12 +377,12 @@ def run(task, model, effort=None, timeout=0, progress=print, preamble=""):
             step = event.get("step_update") or {}
             if step.get("step_type") == "tool" and step.get("state") == "ACTIVE":
                 if shown < MAX_PROGRESS:
-                    progress(f"  · {time.time() - started:4.0f}s  {describe(step)}")
+                    progress(f"  ├─ {time.time() - started:4.0f}s  {describe(step)}")
                     shown += 1
                 else:
                     hidden += 1
     if hidden:
-        progress(f"  · … and {hidden} more steps")
+        progress(f"  ├─ … and {hidden} more steps")
     if not result:
         result = {"status": "ERROR", "response": "".join(other).strip() or "agy returned nothing"}
     usage = result.get("usage") or {}
@@ -304,6 +392,7 @@ def run(task, model, effort=None, timeout=0, progress=print, preamble=""):
         "session": os.environ.get("CLAUDE_CODE_SESSION_ID"),
         "conversation": result.get("conversation_id"),
         "task": " ".join(task.split())[:120],
+        "reason": reason, "remapped_from": remapped_from,
         "input": usage.get("input_tokens", 0), "output": usage.get("output_tokens", 0),
         "thinking": usage.get("thinking_tokens", 0), "cached": usage.get("cache_read_tokens", 0),
     })
@@ -340,8 +429,14 @@ def main(argv=None):
     p.add_argument("--list", action="store_true", help="list models and how tiers resolve")
     p.add_argument("--bare", action="store_true",
                    help="no project context preamble (also CR_AGY_BARE=1)")
+    p.add_argument("--full-context", action="store_true",
+                   help="disable Caveman/skill compression on preamble")
+    p.add_argument("--force-claude", action="store_true",
+                   help="do not remap opus/sonnet to Gemini Argon/Flash when Agy Claude pool is hot")
     p.add_argument("--show-context", action="store_true",
                    help="print the preamble that would be sent, and exit")
+    p.add_argument("--compress", action="store_true",
+                   help="with --show-context, preview the Caveman-compressed preamble")
     p.add_argument("--refresh", action="store_true", help="re-read the model list")
     argv, dropped = strip_background(sys.argv[1:] if argv is None else argv)
     if dropped:
@@ -359,7 +454,7 @@ def main(argv=None):
         if bare_requested(a.bare):
             print("(bare: no preamble)")
             return 0
-        text, stats = build_context()
+        text, stats = build_context(task=" ".join(a.task) or None, use_compress=a.compress)
         print(context_line(stats), file=sys.stderr)
         try:
             sys.stdout.write(text)
@@ -374,22 +469,39 @@ def main(argv=None):
         print()
         for t in TIERS:
             try:
-                print(f"{t:>7} -> {pick(t, models)}")
+                m_id, eff, rem, why = resolve(t, models, force_claude=a.force_claude)
+                note = f" (pool-shifted from {rem}: {why})" if rem else ""
+                print(f"{t:>7} -> {m_id}{note}")
             except SystemExit:
                 print(f"{t:>7} -> (none)")
         return 0
     task = " ".join(a.task) or sys.stdin.read()
     if not task.strip():
         p.error("no task given")
-    model = pick(a.tier, models)
-    print(f"[agy {model}] started", flush=True)
+    model, eff_tier, remapped_from, reason = resolve(
+        a.tier, models, task=task, force_claude=a.force_claude
+    )
+    print(flow.dispatch_banner(model, "Antigravity", reason=reason, remapped_from=remapped_from), flush=True)
     preamble = ""
+    comp_stats = None
     if not bare_requested(a.bare):
-        preamble, stats = build_context()
+        preamble, comp_stats = build_context(task=task, use_compress=not a.full_context)
         if preamble:
-            print(context_line(stats), flush=True)
-    result = run(task, model, a.effort, a.timeout, lambda m: print(m, flush=True), preamble)
-    print(f"[agy {model} · {result.get('status', '?')} · {result.get('duration_seconds') or 0:.0f}s]")
+            print(f"  ├─ {context_line(comp_stats)}", flush=True)
+    t0 = time.time()
+    result = run(task, model, a.effort, a.timeout, lambda m: print(m, flush=True), preamble,
+                 reason=reason, remapped_from=remapped_from)
+    elapsed = result.get("duration_seconds") or (time.time() - t0)
+    print(flow.completion_box(
+        model=model,
+        provider="Antigravity",
+        status=result.get("status", "?"),
+        seconds=float(elapsed),
+        usage=result.get("usage") or {},
+        reason=reason,
+        remapped_from=remapped_from,
+        comp_stats=comp_stats,
+    ), flush=True)
     print((result.get("response") or "").strip())
     return 0 if result.get("status") == "SUCCESS" else 1
 

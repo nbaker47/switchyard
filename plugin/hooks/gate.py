@@ -1,0 +1,262 @@
+"""PreToolUse & PostToolUse hook:
+1. Enforces the thin-dispatcher rule on the front desk so it hands work off to `cr agy` or
+   subagents instead of reading/editing files in the main conversation.
+2. Wraps noisy Bash commands (`git diff/status/log`, `pytest`, etc.) with `rtk` when available.
+3. Emits live Dynamic Flow Graph nodes (`systemMessage`) into the Claude Code TUI as routes
+   start and finish, showing the active model, why it was chosen, and $ saved vs pure Opus.
+"""
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+import agy  # noqa: E402
+import compress  # noqa: E402
+import flow  # noqa: E402
+import quota  # noqa: E402
+from ledger import CACHE, STATE, Ledger, opus_cost, short  # noqa: E402
+
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+READ_TOOLS = {"Read", "Grep", "Glob"}
+HEAVY_BASH_RE = re.compile(
+    r"\b(pytest|npm\s+test|pnpm\s+test|cargo\s+test|go\s+test|make\b|sed\s+-i|perl\s+-i|python3?\s+-c|cat\s+<<)",
+    re.IGNORECASE,
+)
+
+
+def is_subagent(data):
+    """True when the hook fired inside a subagent rather than the front desk."""
+    if data.get("agent_id") or data.get("agent_type"):
+        return True
+    tp = str(data.get("transcript_path") or "")
+    return "/subagents/" in tp or "\\subagents\\" in tp
+
+
+def _turn_state(session_id):
+    if not session_id:
+        return {"reads": 0, "bash": 0}
+    p = CACHE / f"turn-{session_id}.json"
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {"reads": 0, "bash": 0}
+
+
+def _save_turn_state(session_id, st):
+    if not session_id:
+        return
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        (CACHE / f"turn-{session_id}.json").write_text(json.dumps(st))
+    except OSError:
+        pass
+
+
+def _parse_agy_tier(cmd):
+    m = re.search(r"--tier(?:=|\s+)([\w.\-]+)", cmd)
+    return m.group(1) if m else "fast"
+
+
+def _deny(reason, notice_msg=None):
+    out = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+    if notice_msg and os.environ.get("CR_NOTICE", "1") == "1":
+        out["systemMessage"] = notice_msg
+    return out
+
+
+def handle_pre_tool(data):
+    tool = data.get("tool_name") or ""
+    inp = data.get("tool_input") or {}
+    sub = is_subagent(data)
+    enforce = os.environ.get("CR_ENFORCE_DISPATCH", "1") == "1"
+
+    # Inside a subagent: allow all tools, but wrap noisy Bash commands with RTK.
+    if sub:
+        if tool == "Bash":
+            cmd = inp.get("command") or ""
+            wrapped = compress.rtk_wrap(cmd)
+            if wrapped != cmd:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "updatedInput": {**inp, "command": wrapped},
+                    }
+                }
+        return {}
+
+    # Front desk: check if this is a hand-off to `cr agy` or a Claude subagent (`Agent`/`Task`).
+    if tool == "Bash":
+        cmd = (inp.get("command") or "").strip()
+        if re.search(r"(?:^|\s|/)cr\s+agy\b", cmd):
+            tier = _parse_agy_tier(cmd)
+            try:
+                models = (CACHE / "agy-models.txt").read_text().split()
+                model, eff, rem, why = agy.resolve(tier, models, task=cmd)
+            except (OSError, SystemExit):
+                model, rem, why = tier, None, f"tier {tier}"
+            msg = (
+                f"╭─ {flow.dispatch_banner(short(model), 'Antigravity', reason=why, remapped_from=rem)}\n"
+                f"╰─ model: {model} · $0 on Claude plan (billed to Antigravity)"
+            )
+            return {"systemMessage": msg} if os.environ.get("CR_NOTICE", "1") == "1" else {}
+
+    if tool in ("Agent", "Task"):
+        sub_type = inp.get("subagent_type") or "subagent"
+        desc = (inp.get("description") or "").strip()
+        msg = (
+            f"╭─ {flow.dispatch_banner(sub_type, 'Claude', reason=desc or 'isolated subagent context')}\n"
+            f"╰─ keeps raw file reads & tool output out of main conversation"
+        )
+        return {"systemMessage": msg} if os.environ.get("CR_NOTICE", "1") == "1" else {}
+
+    if not enforce:
+        return {}
+
+    sid = data.get("session_id")
+    st = _turn_state(sid)
+    saver_on, _ = quota.saver()
+    pace_on = quota.pace_status().get("hot", False)
+    strict_saver = saver_on or pace_on
+
+    # 1. Never allow the front desk to edit/write files directly.
+    if tool in EDIT_TOOLS:
+        return _deny(
+            "Switchyard front desk is dispatcher-only: never edit/write files in the main "
+            "conversation. Hand this task to `cr agy --tier auto \"<brief>\"` (or `--tier sonnet` "
+            "/ `--tier fast`), or `Agent(subagent_type='switchyard:worker')` if it needs browser/Claude-only MCP.",
+            notice_msg="⇄ blocked front-desk edit ──► redirecting to `cr agy` hand-off",
+        )
+
+    # 2. Limit direct Read/Grep/Glob on the front desk so raw file contents don't bloat context.
+    if tool in READ_TOOLS:
+        max_reads = 0 if strict_saver else int(os.environ.get("CR_DESK_MAX_READS", "1"))
+        st["reads"] = st.get("reads", 0) + 1
+        _save_turn_state(sid, st)
+        if st["reads"] > max_reads:
+            return _deny(
+                f"Switchyard front desk limit ({max_reads} direct read/search per turn): "
+                "every file read in the main session is re-billed on every future turn. "
+                "Hand this lookup/reading to `cr agy --tier fast \"<brief>\"` (or "
+                "`Agent(subagent_type='switchyard:scout')` for a tiny lookup).",
+                notice_msg="⇄ front-desk read cap reached ──► redirecting to `cr agy --tier fast` / `scout`",
+            )
+
+    # 3. Limit direct non-cr Bash commands on the front desk.
+    if tool == "Bash":
+        cmd = (inp.get("command") or "").strip()
+        if not re.search(r"(?:^|\s|/)cr\b", cmd):
+            max_bash = 0 if strict_saver else int(os.environ.get("CR_DESK_MAX_BASH", "1"))
+            st["bash"] = st.get("bash", 0) + 1
+            _save_turn_state(sid, st)
+            if st["bash"] > max_bash or HEAVY_BASH_RE.search(cmd):
+                return _deny(
+                    "Switchyard front desk is dispatcher-only: do not run test suites, scripts, "
+                    "or multi-step shell loops in the main conversation. Hand the task to "
+                    "`cr agy --tier fast \"<brief>\"` or `cr agy --tier auto \"<brief>\"`.",
+                    notice_msg="⇄ blocked front-desk shell loop ──► redirecting to `cr agy`",
+                )
+            wrapped = compress.rtk_wrap(cmd)
+            if wrapped != cmd:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "updatedInput": {**inp, "command": wrapped},
+                    }
+                }
+    return {}
+
+
+def _latest_agy_run(session_id):
+    try:
+        with open(STATE / "agy.jsonl", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 16 * 1024))
+            lines = f.read().decode("utf-8", "ignore").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not session_id or r.get("session") == session_id or (time.time() - r.get("ts", 0) < 30):
+            return r
+    return None
+
+
+def handle_post_tool(data):
+    if is_subagent(data) or os.environ.get("CR_NOTICE", "1") != "1":
+        return {}
+    tool = data.get("tool_name") or ""
+    inp = data.get("tool_input") or {}
+    sid = data.get("session_id")
+    tp = data.get("transcript_path")
+    desk = os.environ.get("CR_FRONT_MODEL", "haiku")
+
+    if tool == "Bash" and re.search(r"(?:^|\s|/)cr\s+agy\b", (inp.get("command") or "")):
+        r = _latest_agy_run(sid)
+        s = Ledger(sid, tp).refresh().summary() if sid else None
+        if r:
+            c = {
+                "input": r.get("input", 0),
+                "cache_read": r.get("cached", 0),
+                "output": r.get("output", 0) + r.get("thinking", 0),
+                "cache_write": 0,
+            }
+            call_saved = opus_cost(c)
+            model = r.get("model", "?")
+            rem = r.get("remapped_from")
+            why = r.get("reason") or "Antigravity hand-off"
+            label = f"{rem}→{short(model)}" if rem else short(model)
+            sess_txt = (
+                f" │ session saved: ${s['saved']:.2f} (−{s['saved_pct']:.0f}% vs all-Opus)"
+                if s and s.get("baseline") else ""
+            )
+            msg = (
+                f"╭─ ⇄ flow complete: [prompt] ──► [{desk} desk] ──► [Antigravity: {label}] ──► [✓ {r.get('seconds', 0):.1f}s]\n"
+                f"╰─ why: {why} │ 💰 saved ${call_saved:.3f} vs pure Opus{sess_txt}"
+            )
+            return {"systemMessage": msg}
+
+    if tool in ("Agent", "Task"):
+        s = Ledger(sid, tp).refresh().summary() if sid else None
+        last = s.get("last") if s else None
+        if last:
+            call_saved = max(0.0, (last.get("opus") or 0.0) - (last.get("cost") or 0.0))
+            sess_txt = (
+                f" │ session saved: ${s['saved']:.2f} (−{s['saved_pct']:.0f}% vs all-Opus)"
+                if s and s.get("baseline") else ""
+            )
+            msg = (
+                f"╭─ ⇄ flow complete: [prompt] ──► [{desk} desk] ──► [Claude: {last.get('route')} ({last.get('model')})] ──► [✓ {last.get('seconds', 0):.1f}s]\n"
+                f"╰─ 💰 saved ${call_saved:.3f} vs pure Opus{sess_txt}"
+            )
+            return {"systemMessage": msg}
+    return {}
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else "pre"
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        return 0
+    out = handle_post_tool(data) if mode == "post" else handle_pre_tool(data)
+    if out:
+        print(json.dumps(out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
