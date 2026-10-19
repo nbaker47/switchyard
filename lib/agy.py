@@ -526,6 +526,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="cr agy", description=__doc__.split("\n")[0])
     p.add_argument("task", nargs="*")
     p.add_argument("--tier", default="fast")
+    p.add_argument("--why", default="", help="short routing justification shown in the flow banner")
     p.add_argument("--effort")
     p.add_argument("--timeout", type=int, default=0, help="seconds; 0 waits for the turn")
     p.add_argument("--list", action="store_true", help="list models and how tiers resolve")
@@ -586,6 +587,9 @@ def main(argv=None):
     model, eff_tier, remapped_from, reason = resolve(
         a.tier, models, task=task, force_claude=a.force_claude
     )
+    if a.why.strip():
+        reason = a.why.strip() if reason.startswith("tier ") else f"{a.why.strip()} · {reason}"
+    bal = quota.pool_balance()
 
     # Check if a warm standby session exists for this model (unless --new or CR_AGY_NO_STANDBY=1).
     standby_enabled = os.environ.get("CR_AGY_NO_STANDBY") != "1"
@@ -626,7 +630,8 @@ def main(argv=None):
                      reason=reason, remapped_from=remapped_from, conversation_id=conv_id,
                      comp_stats=comp_stats, standby_info=sb_entry)
     else:
-        result = run(task, model, a.effort, a.timeout, prog_fn, preamble)
+        result = run(task, model, a.effort, a.timeout, prog_fn, preamble,
+                     reason=reason, remapped_from=remapped_from, comp_stats=comp_stats)
     # If resuming a stale conversation failed, retry once fresh with preamble!
     if conv_id and result.get("status") != "SUCCESS" and not a.conversation:
         if not in_claude_tool:
@@ -634,7 +639,8 @@ def main(argv=None):
         conv_id, sb_entry = None, None
         if not bare_requested(a.bare):
             preamble, comp_stats = build_context(task=task, use_compress=not a.full_context)
-        result = run(task, model, a.effort, a.timeout, prog_fn, preamble)
+        result = run(task, model, a.effort, a.timeout, prog_fn, preamble,
+                     reason=reason, remapped_from=remapped_from, comp_stats=comp_stats)
 
     if standby_enabled and result.get("status") == "SUCCESS" and result.get("conversation_id"):
         saved_sb = standby_record(model, result["conversation_id"])
@@ -655,6 +661,8 @@ def main(argv=None):
             remapped_from=remapped_from,
             comp_stats=comp_stats,
             standby_info=sb_entry,
+            tier=eff_tier,
+            balance=bal,
         ), flush=True)
     print((result.get("response") or "").strip())
     return 0 if result.get("status") == "SUCCESS" else 1

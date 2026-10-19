@@ -67,9 +67,9 @@ INLINE_SPAN = re.compile(r"(`[^`]+`|\"[^\"]+\"|'[^']+'|https?://\S+|[@~/][\w./\-
 COD_WIRE_RULES = (
     "Token discipline (Chain-of-Draft + Caveman Wire Protocol): "
     "(1) Internal reasoning/drafting: <=5 words per step (`file.py:42 -> nil ref -> guard`). "
-    "(2) Drop filler, pleasantries, hedging, and prompt restatements. "
-    "(3) Keep all code, paths, commands, URLs and requested drafts exact. "
-    "(4) Return compact wire format: `STATUS | CHANGED (path:line) | SUMMARY | VERIFY`."
+    "(2) Drop filler, pleasantries, hedging, and prompt restatements; NEVER add a `route:` footer at the end of your reply (the TUI banner shows the route). "
+    "(3) Always pass `--why \"<task + why this model over alternative>\"` on `cr agy` calls. "
+    "(4) Keep all code, paths, commands, URLs and requested drafts exact."
 )
 
 # Section titles in CLAUDE.md that only apply when the task matches their keywords.

@@ -113,11 +113,16 @@ the front desk's own reading and reasoning there too:
 - **Hard rule: Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude subagent, in saver mode too, because agy has no browser and none of our hooks. Below 95% of the plan limit, do the browser work on the cheapest Claude route that can do it (a Sonnet subagent for the browser steps, not Opus) and say the plan percentage in one line first; at 95% or more, stop and tell the user instead of starting it, and never hand it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.**
 It switches off by itself when the limit or pace resets.
 
-## Live Routing Flow Visuals (Zero-Token TUI Hooks)
+## Live Routing Flow Visuals (Zero-Token TUI Banners — No Footer)
 
-- **The switchyard hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`) and status line
-  automatically render the live ASCII flow graph and `$` savings box in the TUI at 0 token
-  cost.** Do NOT draw ASCII boxes yourself in your reply.
+- **All routing visuals and justifications live in the zero-token TUI banners (`UserPromptSubmit`,
+  `PreToolUse`, `PostToolUse`) and status line.** Do NOT draw ASCII boxes yourself, and **do NOT
+  add a `route:` footer line at the end of your reply.**
+- **Always pass `--why "<task + why this tier over runner-up>"` on `cr agy` calls** so the TUI
+  banner displays your exact justification alongside the live quota pools:
+  - Example: `cr agy --tier strong --why "gameshow brainstorm + channel notes; Argon over Opus for wide ideation & keeping Agy Claude pool free" "GOAL: ..."`
+  - Example: `cr agy --tier opus --why "channel script in house style; Opus over Argon for strict voice match" "GOAL: ..."`
+  - Example: `cr agy --tier sonnet --why "agy sonnet (claude-sonnet-5-5-medium): scoped fix, no browser" "GOAL: ..."`
 - **Before a hand-off, state at most one short telegraphic phrase (`<=10 words`)** or call the
   tool immediately so you don't waste output tokens.
 - **Anything likely to take more than ~30 seconds runs in the background.** That is a
@@ -153,14 +158,6 @@ It switches off by itself when the limit or pace resets.
 - **Fall back to Claude when agy fails.** If `cr agy` errors or its quota is exhausted, run
   the matching Claude subagent instead (worker for sonnet, deep for opus) and say so in one
   line.
-
-## End every reply with a compact route tag
-
-End with one short line (`<=12 words`), e.g.
-`route: agy strong (gemini-4-argon-high): brainstorm, pool balance`
-`route: agy sonnet (claude-sonnet-5-5-medium): scoped fix, no browser`
-`route: worker (Sonnet): Chrome browser`
-or `route: self: from context`.
 
 If a `[switchyard]` line says the context is large and the new request is unrelated,
 suggest `/clear` once, in one line.

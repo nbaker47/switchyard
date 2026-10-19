@@ -216,13 +216,15 @@ class CompressionAndGate(unittest.TestCase):
                 "session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "tool_input": {}
             })
             self.assertEqual(res_sub, {})
-            # Front desk running cr agy -> emits live flow graph systemMessage
+            # Front desk running cr agy -> emits live flow graph systemMessage with model + quota why
             res_agy = gate.handle_pre_tool({
                 "session_id": "s1", "tool_name": "Bash",
-                "tool_input": {"command": "cr agy --tier strong 'design x'"}
+                "tool_input": {"command": "cr agy --tier strong --why 'gameshow brainstorm' 'design x'"}
             })
-            self.assertIn("switchyard", res_agy.get("systemMessage", "") + "switchyard")
             self.assertIn("Antigravity", res_agy.get("systemMessage", ""))
+            self.assertIn("why model:", res_agy.get("systemMessage", ""))
+            self.assertIn("gameshow brainstorm", res_agy.get("systemMessage", ""))
+            self.assertIn("Argon > Opus", res_agy.get("systemMessage", ""))
 
     def test_flow_completion_box_shows_opus_savings(self):
         box = flow.completion_box(
@@ -234,10 +236,14 @@ class CompressionAndGate(unittest.TestCase):
             reason="pool shift",
             remapped_from="opus",
             comp_stats={"raw_chars": 10000, "saved_chars": 7500, "omitted_skills": 25},
+            balance={"claude_used": 25.0, "agy_claude": 0.0, "agy_gemini": 8.0,
+                     "pace": {"hot": True, "window": "seven_day", "used": 25.0, "elapsed_pct": 22.0, "projected": 115.0}},
         )
         self.assertIn("opus→argon-high", box)
         self.assertIn("saved vs pure Opus", box)
         self.assertIn("preamble −75%", box)
+        self.assertIn("quota:", box)
+        self.assertIn("proj 115% saver", box)
 
     def test_warm_standby_reuses_and_expires_after_3_idle_turns(self):
         with tempfile.TemporaryDirectory() as tmp:

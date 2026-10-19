@@ -60,6 +60,13 @@ def _parse_agy_tier(cmd):
     return m.group(1) if m else "fast"
 
 
+def _parse_agy_why(cmd):
+    m = re.search(r"""--why(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))""", cmd)
+    if not m:
+        return ""
+    return (m.group(1) or m.group(2) or m.group(3) or "").strip()
+
+
 def _deny(reason, notice_msg=None):
     out = {
         "hookSpecificOutput": {
@@ -99,23 +106,33 @@ def handle_pre_tool(data):
         cmd = (inp.get("command") or "").strip()
         if re.search(r"(?:^|\s|/)cr\s+agy\b", cmd):
             tier = _parse_agy_tier(cmd)
+            why_arg = _parse_agy_why(cmd)
+            bal = quota.pool_balance()
             try:
                 models = (CACHE / "agy-models.txt").read_text().split()
                 model, eff, rem, why = agy.resolve(tier, models, task=cmd)
             except (OSError, SystemExit):
-                model, rem, why = tier, None, f"tier {tier}"
-            msg = (
-                f"╭─ {flow.dispatch_banner(short(model), 'Antigravity', reason=why, remapped_from=rem)}\n"
-                f"╰─ model: {model} · $0 on Claude plan (billed to Antigravity)"
+                model, eff, rem, why = tier, tier, None, f"tier {tier}"
+            if why_arg:
+                why = why_arg if why.startswith("tier ") else f"{why_arg} · {why}"
+            sb = None
+            if "--new" not in cmd:
+                sb = agy.standby_get(model, session_id=data.get("session_id"), cwd=data.get("cwd"))
+                if sb:
+                    sb = {**sb, "turns": sb.get("turns", 1) + 1}
+            msg = flow.dispatch_banner(
+                short(model), "Antigravity", reason=why, remapped_from=rem,
+                standby_info=sb, tier=eff, balance=bal, full_model=model,
             )
             return {"systemMessage": msg} if os.environ.get("CR_NOTICE", "1") == "1" else {}
 
     if tool in ("Agent", "Task"):
         sub_type = inp.get("subagent_type") or "subagent"
         desc = (inp.get("description") or "").strip()
-        msg = (
-            f"╭─ {flow.dispatch_banner(sub_type, 'Claude', reason=desc or 'isolated subagent context')}\n"
-            f"╰─ keeps raw file reads & tool output out of main conversation"
+        bal = quota.pool_balance()
+        msg = flow.dispatch_banner(
+            sub_type, "Claude", reason=desc or "browser / Claude-only tooling or scout lookup",
+            tier=sub_type.split(":")[-1], balance=bal,
         )
         return {"systemMessage": msg} if os.environ.get("CR_NOTICE", "1") == "1" else {}
 
@@ -207,6 +224,7 @@ def handle_post_tool(data):
     if tool == "Bash" and re.search(r"(?:^|\s|/)cr\s+agy\b", (inp.get("command") or "")):
         r = _latest_agy_run(sid)
         s = Ledger(sid, tp).refresh().summary() if sid else None
+        bal = quota.pool_balance()
         if r:
             box = flow.completion_box(
                 model=r.get("model", "?"),
@@ -219,10 +237,11 @@ def handle_post_tool(data):
                     "output": r.get("output", 0),
                     "thinking": r.get("thinking", 0),
                 },
-                reason=r.get("reason") or "Antigravity hand-off",
+                reason=r.get("reason") or _parse_agy_why(inp.get("command") or "") or "Antigravity hand-off",
                 remapped_from=r.get("remapped_from"),
                 comp_stats=r.get("comp_stats"),
                 standby_info=r.get("standby_info"),
+                balance=bal,
             )
             if s and s.get("baseline"):
                 box += f"\n  session total saved vs all-Opus: 💰 ${s['saved']:.2f} (−{s['saved_pct']:.0f}%)"
@@ -231,14 +250,18 @@ def handle_post_tool(data):
     if tool in ("Agent", "Task"):
         s = Ledger(sid, tp).refresh().summary() if sid else None
         last = s.get("last") if s else None
+        bal = quota.pool_balance()
         if last:
             call_saved = max(0.0, (last.get("opus") or 0.0) - (last.get("cost") or 0.0))
             sess_txt = (
                 f" │ session saved: ${s['saved']:.2f} (−{s['saved_pct']:.0f}% vs all-Opus)"
                 if s and s.get("baseline") else ""
             )
+            q_txt = flow.quota_rationale(bal)
+            q_line = f"│  quota: {q_txt}\n" if q_txt else ""
             msg = (
                 f"╭─ ⇄ flow complete: [prompt] ──► [{desk} desk] ──► [Claude: {last.get('route')} ({last.get('model')})] ──► [✓ {last.get('seconds', 0):.1f}s]\n"
+                f"{q_line}"
                 f"╰─ 💰 saved ${call_saved:.3f} vs pure Opus{sess_txt}"
             )
             return {"systemMessage": msg}
