@@ -170,15 +170,13 @@ def limits_lines(w, status, summary, now, q=None, agy=None):
         v = p["used"]
         rs = until(p.get("resets_at"), now)
         tail = f" {v:>3.0f}%" + (f" {rs:>6}" if rs else "")
-        label = p["pool"].replace("Gemini ", "G ") if w < 50 else p["pool"]
+        label = p["pool"] if w < 50 or p["pool"] == "Claude" else "Gemini"
         lw = 12 if w >= 50 else 7
         bw = max(4, w - 2 - lw - len(tail) - 1)
         mark = f" {RED}!{R}" if v >= 85 else ""
         lines.append(f" {DIM}{label:<{lw}}{R} {bar(v / 100, bw, heat(v))}{heat(v)}{tail}{R}{mark}")
     if not pools:
         lines.append(f" {DIM}no limit data yet{R}")
-    else:
-        lines.append(f" {DIM}Argon, 3.8 Flash: not reported{R}")
     for prov in dict.fromkeys(key.split("|", 1)[0] for key in by if not key.startswith("Claude|")):
         if prov == "Antigravity":
             tok = sum(sum(c.values()) for key, c in by.items() if key.split("|", 1)[0] == prov)
@@ -269,8 +267,7 @@ def demo_data(now):
         "five_hour": {"used_percentage": 42, "resets_at": now + 2 * 3600 + 13 * 60},
         "seven_day": {"used_percentage": 71, "resets_at": now + 3 * 86400 + 4 * 3600}},
         "agy": [{"pool": "Claude", "used": 23, "resets_at": now + 4 * 3600 + 41 * 60},
-                {"pool": "Gemini Pro", "used": 8, "resets_at": now + 4 * 3600 + 59 * 60},
-                {"pool": "Gemini Flash", "used": 64, "resets_at": now + 4 * 3600 + 59 * 60}]}
+                {"pool": "Gemini", "used": 12, "resets_at": now + 4 * 3600 + 59 * 60}]}
     return s, status
 
 

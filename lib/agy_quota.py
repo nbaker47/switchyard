@@ -1,9 +1,12 @@
-"""Antigravity quota per model pool, from the `antigravity-usage` CLI.
+"""Antigravity quota per model pool: Claude (with GPT-OSS) and Gemini (Argon and every Flash).
 
-agy itself exposes no quota, but `antigravity-usage --json` reads it from Google. Models share
-pools (every Claude model draws on one, Gemini Pro and Flash on others), so we show one bar
-per pool using the lowest remaining share in it. The CLI takes a few seconds, so the result
-is cached on disk and refreshed in the background; the dash never waits for it.
+agy exposes no quota itself. It talks to Google's daily Cloud Code endpoint, and that endpoint
+reports quota per pool: all Claude models share one, all Gemini models (Argon included, which
+has no entry of its own) share another. The `antigravity-usage` CLI reads the production
+endpoint, which lags behind, so we run it only to keep its login fresh and fall back to its
+numbers, and ask the daily endpoint directly with the same login. The call takes a few
+seconds, so the result is cached on disk and refreshed in the background; the dash never
+waits for it.
 """
 import json
 import os
@@ -13,42 +16,72 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "switchyard" / "agy-quota.json"
+TOKENS = Path.home() / "Library/Application Support/antigravity-usage/accounts"
+DAILY = "https://daily-cloudcode-pa.googleapis.com"
+META = {"ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI"}
 TTL = 60
 MAX_AGE = 6 * 3600
 _busy = threading.Lock()
 
 
 def pool(model_id):
-    """Pool a model id belongs to, or None for ones not worth a bar (autocomplete-only etc.)."""
+    """Pool a model id belongs to, or None for ones without a bar (autocomplete, tab, chat ids)."""
     m = model_id.lower()
-    if m.startswith("claude-"):
+    if m.startswith(("claude-", "gpt-oss")):
         return "Claude"
-    if m.startswith("gemini") and "pro" in m:
-        return "Gemini Pro"
-    if m.startswith("gemini") and "flash" in m:
-        return "Gemini Flash"
+    if m.startswith("gemini"):
+        return "Gemini"
     return None
 
 
+def _ts(iso):
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
 def parse(data):
-    """[{"pool", "used", "resets_at"}] with used in percent; the fullest model in each pool wins."""
+    """[{"pool", "used", "resets_at"}], used in percent, the fullest model in each pool winning.
+
+    Takes either the CLI's {"models": [{modelId, remainingPercentage, resetTime}]} or the API's
+    {"models": {id: {quotaInfo: {remainingFraction, resetTime}}}}.
+    """
+    models = (data or {}).get("models") or []
+    if isinstance(models, dict):
+        models = [{"modelId": k, "remainingPercentage": (v.get("quotaInfo") or {}).get("remainingFraction"),
+                   "resetTime": (v.get("quotaInfo") or {}).get("resetTime")} for k, v in models.items()]
     pools = {}
-    for m in (data or {}).get("models") or []:
+    for m in models:
         name = pool(m.get("modelId", ""))
         rem = m.get("remainingPercentage")
         if not name or m.get("isAutocompleteOnly") or not isinstance(rem, (int, float)):
             continue
-        try:
-            reset = datetime.fromisoformat(m["resetTime"].replace("Z", "+00:00")).timestamp()
-        except (KeyError, ValueError):
-            reset = None
         used = 100.0 * (1.0 - rem)
         if name not in pools or used > pools[name]["used"]:
-            pools[name] = {"pool": name, "used": used, "resets_at": reset}
-    order = ["Claude", "Gemini Pro", "Gemini Flash"]
-    return sorted(pools.values(), key=lambda p: order.index(p["pool"]))
+            pools[name] = {"pool": name, "used": used, "resets_at": _ts(m.get("resetTime"))}
+    return sorted(pools.values(), key=lambda p: ["Claude", "Gemini"].index(p["pool"]))
+
+
+def _post(path, body, token):
+    req = Request(DAILY + path, json.dumps(body).encode(),
+                  {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "User-Agent": "antigravity"})
+    return json.load(urlopen(req, timeout=15))
+
+
+def _daily():
+    """Quota from the daily endpoint using the usage CLI's login, or None."""
+    for f in sorted(TOKENS.glob("*/tokens.json")):
+        try:
+            token = json.loads(f.read_text())["accessToken"]
+            proj = _post("/v1internal:loadCodeAssist", {"metadata": META}, token).get("cloudaicompanionProject")
+            return parse(_post("/v1internal:fetchAvailableModels", {"project": proj} if proj else {}, token))
+        except Exception:  # missing file, bad token, network or HTTP error: try the next account
+            continue
+    return None
 
 
 def _refresh():
@@ -56,8 +89,9 @@ def _refresh():
         exe = shutil.which("antigravity-usage")
         if not exe:
             return
+        # Running the CLI refreshes its login; its own numbers are the fallback.
         out = subprocess.run([exe, "--json"], capture_output=True, text=True, timeout=30).stdout
-        pools = parse(json.loads(out))
+        pools = _daily() or parse(json.loads(out))
         if pools:
             CACHE.parent.mkdir(parents=True, exist_ok=True)
             CACHE.write_text(json.dumps({"ts": time.time(), "pools": pools}))
