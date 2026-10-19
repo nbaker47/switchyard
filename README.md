@@ -101,7 +101,8 @@ conversation again for the new model. So switchyard routes **tasks**, not messag
 2. **The front desk decides; nothing guesses for it.** Sonnet reads every request anyway,
    and it understands requests far better than keyword rules, so it picks the route by what
    the request *needs*: answerable from the conversation, a small lookup, a lot of reading,
-   a scoped change, a large mechanical change, or deep judgement. A `UserPromptSubmit` hook
+   a scoped change, a large mechanical change, or deep judgement; scoped changes and deep
+   judgement go to the agy copies of Sonnet and Opus unless they need a browser. A `UserPromptSubmit` hook
    only adds facts it can't see itself: how full your Claude plan is (and so saver mode), the
    conversation's size, and which agy models exist today. It costs no extra model call.
 3. **Routes:**
@@ -110,8 +111,10 @@ conversation again for the new model. So switchyard routes **tasks**, not messag
    |---|---|---|
    | self | front desk | conversation, short answers |
    | `switchyard:scout` | Haiku | read-only lookups |
-   | `switchyard:worker` | Sonnet | scoped changes |
-   | `switchyard:deep` | Opus | design, hard bugs, security |
+   | `cr agy --tier sonnet` | Sonnet (agy) | scoped changes (default) |
+   | `cr agy --tier opus` | Opus (agy) | design, hard bugs, security (default) |
+   | `switchyard:worker` | Sonnet | browser/Claude-only tooling; fallback if agy fails |
+   | `switchyard:deep` | Opus | browser/Claude-only tooling; fallback if agy fails |
    | `cr agy --tier fast` | Gemini Flash | bulk and mechanical work |
    | `cr agy --tier strong` | Gemini Argon | whole-repo context, second opinions |
 
@@ -119,10 +122,17 @@ conversation again for the new model. So switchyard routes **tasks**, not messag
    agy session. The front desk only sees a short report back, so every following turn
    costs less. `cr` also sets `--autocompact 160k` (`CR_AUTOCOMPACT`).
 
-5. **Saver mode.** When your Claude plan reaches 80% of its 5-hour or 7-day limit
-   (`CR_SAVER_AT`), any request that needs work goes to the Antigravity plan: Flash for
-   reading and mechanical work, Sonnet via agy for scoped changes, Argon or Opus via agy for
-   deep judgement. The front desk only answers from what is already in the conversation, and
+5. **Agy first.** Sonnet- and Opus-class work goes to the Antigravity copies by default,
+   saver mode or not. It stays on Claude (worker/deep subagents or the front desk) only when
+   it needs a browser or Claude-only tooling: Claude in Chrome, Google Flow, AI Studio, Meta
+   Business Suite, YouTube Studio, Buffer/TikTok, `podvid live`, computer-use, Claude-only MCP
+   connectors, Agent Teams. If an agy run errors or its quota is exhausted, the front desk
+   falls back to worker (sonnet) or deep (opus) and says so.
+
+6. **Saver mode.** When your Claude plan reaches 80% of its 5-hour or 7-day limit
+   (`CR_SAVER_AT`), even the front desk's own reading and reasoning moves to the Antigravity
+   plan (Flash for reading and mechanical work); it no longer decides where Sonnet/Opus-class
+   work goes. The front desk only answers from what is already in the conversation, and
    a tiny lookup may still use Haiku. It switches off when the window
    resets. The usage figures come from Claude Code's status line, so they are as fresh as
    your last `cr` session. Browser work (Claude in Chrome, Google Flow, AI Studio, Meta

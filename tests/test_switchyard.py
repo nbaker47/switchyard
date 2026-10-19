@@ -78,6 +78,22 @@ class Facts(unittest.TestCase):
         self.assertIn(BROWSER_RULE, saver)
         self.assertLess(router.index(BROWSER_RULE), router.index("## What each model is good at"))
 
+    def test_agy_first_policy_in_facts_regardless_of_saver(self):
+        for active in (True, False):
+            st = {"active": active, "pct": 91 if active else 40, "window": "7-day", "resets": None}
+            text = route.facts(None, st, {})[1]
+            self.assertIn("--tier sonnet", text)
+            self.assertIn("--tier opus", text)
+            self.assertIn("browser integration", text)
+            self.assertIn("fallback", text)
+
+    def test_router_prompt_prefers_agy_with_fallback(self):
+        router = (ROOT / "prompts/router.md").read_text()
+        self.assertIn("Agy first for Sonnet/Opus-class work", router)
+        self.assertIn("agy sonnet (claude-sonnet-5-5-medium)", router)
+        self.assertIn("Fall back to Claude when agy fails", router)
+        self.assertNotIn("with saver mode OFF the deep subagent", router)
+
     def test_saver_off_mentions_usage_only(self):
         off = {"active": False, "pct": 40, "window": "5-hour", "resets": None}
         text = route.facts(None, off, {})[1]

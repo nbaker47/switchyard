@@ -67,6 +67,16 @@ BROWSER_RULE = (
 )
 
 
+AGY_FIRST = (
+    "Sonnet/Opus-class work (scoped changes, design, hard bugs, brainstorming) goes to "
+    "`cr agy --tier sonnet` / `--tier opus` (or `--tier strong`) by default, saver mode or not. "
+    "Use the worker/deep subagents only for work that needs browser integration or Claude-only "
+    "tooling (Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, "
+    "podvid live, computer-use, Claude-only MCP connectors, Agent Teams), or as the fallback if "
+    "agy errors or its quota is exhausted."
+)
+
+
 def saver_state(q=None):
     q = quota.latest() if q is None else q
     active, pct = quota.saver(q)
@@ -79,13 +89,15 @@ def facts(transcript_path, saver, tiers):
     """The context added to the prompt for the front desk."""
     ctx = context_tokens(transcript_path) if transcript_path else 0
     lines = [f"[switchyard] Context so far: ~{ctx // 1000}K tokens."]
+    lines.append("[switchyard] Routing: " + AGY_FIRST)
     if saver["active"]:
         when = time.strftime("%a %H:%M", time.localtime(saver["resets"])) if saver["resets"] else "its reset"
         lines.append(
             f"[switchyard] SAVER MODE ON: the Claude plan's {saver['window']} limit is at "
             f"{saver['pct']:.0f}% (threshold {quota.SAVER_AT:.0f}%) until {when}. Any request that "
             "needs work (reading files or data, running commands, searching, editing, reasoning "
-            "at length) goes to the Antigravity plan via `cr agy`. Answer yourself only from what "
+            "at length) goes to the Antigravity plan via `cr agy`, including what you would "
+            "otherwise read or reason through yourself. Answer yourself only from what "
             "is already in this conversation. A tiny lookup may still use the scout subagent. "
             "HARD RULE: " + BROWSER_RULE)
     elif saver["pct"] is not None:
