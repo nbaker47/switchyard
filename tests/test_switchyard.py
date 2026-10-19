@@ -204,3 +204,17 @@ class Saving(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_agy_quota_pools():
+    import agy_quota
+    data = {"models": [
+        {"modelId": "claude-opus-5-5-high", "remainingPercentage": 0.8, "resetTime": "2026-10-19T19:00:00Z"},
+        {"modelId": "claude-sonnet-5-5-low", "remainingPercentage": 0.7, "resetTime": "2026-10-19T19:00:00Z"},
+        {"modelId": "gemini-3.6-flash-low", "remainingPercentage": 1, "resetTime": "2026-10-19T19:30:00Z"},
+        {"modelId": "gemini-2.5-flash", "remainingPercentage": 0.1, "isAutocompleteOnly": True,
+         "resetTime": "2026-10-19T19:30:00Z"},
+        {"modelId": "gemini-pro-agent", "remainingPercentage": 0.5, "resetTime": "2026-10-19T19:30:00Z"},
+    ]}
+    got = {p["pool"]: round(p["used"]) for p in agy_quota.parse(data)}
+    assert got == {"Claude": 30, "Gemini Pro": 50, "Gemini Flash": 0}

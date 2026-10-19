@@ -49,7 +49,8 @@ column; wide terminals put the feed on the left and the panels on the right.
 
 Run `cr dash` in a split pane next to `cr`. It shows three things: live requests (what each
 prompt was routed to, its tokens and how much it saved), provider limits (your 5-hour and 7-day
-Claude windows and saver mode), and saved by routing (what the same work would have cost on
+Claude windows and saver mode, plus an Antigravity bar per quota pool when the
+`antigravity-usage` CLI is installed), and saved by routing (what the same work would have cost on
 Opus alone). The screenshots use sample data (`cr dash --demo`); regenerate them with
 `python3 scripts/render_dash_images.py`.
 

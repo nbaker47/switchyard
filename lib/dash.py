@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agy_quota  # noqa: E402
 import quota  # noqa: E402
 from ledger import CACHE, Ledger, cost, latest_session, opus_cost, short  # noqa: E402
 
@@ -140,7 +141,7 @@ def feed_rows(requests, fw, rows, now):
     return out
 
 
-def limits_lines(w, status, summary, now, q=None):
+def limits_lines(w, status, summary, now, q=None, agy=None):
     """One bar per window per plugged-in provider, plus saver mode."""
     q = q or quota.latest() or (status.get("rate_limits") or {})
     lines = []
@@ -163,12 +164,26 @@ def limits_lines(w, status, summary, now, q=None):
     if not shown:
         lines.append(f" {DIM}no limit data yet{R}")
     by = summary["by"]
-    provs = list(dict.fromkeys(["Antigravity"] + [key.split("|", 1)[0] for key in by if not key.startswith("Claude|")]))
-    for prov in provs:
-        tok = sum(sum(c.values()) for key, c in by.items() if key.split("|", 1)[0] == prov)
-        # agy does not expose a quota; show what this session has used instead.
-        lines.append(f"{PROVIDER_COLOR.get(prov, CYAN)}{B}{prov}{R} {DIM}no limit data{R} "
-                     f"{k(tok)} tok this session")
+    lines.append(f"{MAGENTA}{B}Antigravity{R}")
+    pools = agy if agy is not None else agy_quota.latest()
+    for p in pools:
+        v = p["used"]
+        rs = until(p.get("resets_at"), now)
+        tail = f" {v:>3.0f}%" + (f" {rs:>6}" if rs else "")
+        label = p["pool"].replace("Gemini ", "G ") if w < 50 else p["pool"]
+        lw = 12 if w >= 50 else 7
+        bw = max(4, w - 2 - lw - len(tail) - 1)
+        mark = f" {RED}!{R}" if v >= 85 else ""
+        lines.append(f" {DIM}{label:<{lw}}{R} {bar(v / 100, bw, heat(v))}{heat(v)}{tail}{R}{mark}")
+    if not pools:
+        lines.append(f" {DIM}no limit data yet{R}")
+    for prov in dict.fromkeys(key.split("|", 1)[0] for key in by if not key.startswith("Claude|")):
+        if prov == "Antigravity":
+            tok = sum(sum(c.values()) for key, c in by.items() if key.split("|", 1)[0] == prov)
+            lines.append(f" {DIM}{k(tok)} tok this session{R}")
+        else:
+            tok = sum(sum(c.values()) for key, c in by.items() if key.split("|", 1)[0] == prov)
+            lines.append(f"{PROVIDER_COLOR.get(prov, CYAN)}{B}{prov}{R} {DIM}no limit data{R} {k(tok)} tok this session")
     return lines
 
 
@@ -250,7 +265,10 @@ def demo_data(now):
          "saved_pct": 100 * (baseline - actual) / baseline, "requests": reqs}
     status = {"cwd": "~/projects/demo-app", "rate_limits": {
         "five_hour": {"used_percentage": 42, "resets_at": now + 2 * 3600 + 13 * 60},
-        "seven_day": {"used_percentage": 71, "resets_at": now + 3 * 86400 + 4 * 3600}}}
+        "seven_day": {"used_percentage": 71, "resets_at": now + 3 * 86400 + 4 * 3600}},
+        "agy": [{"pool": "Claude", "used": 23, "resets_at": now + 4 * 3600 + 41 * 60},
+                {"pool": "Gemini Pro", "used": 8, "resets_at": now + 4 * 3600 + 59 * 60},
+                {"pool": "Gemini Flash", "used": 64, "resets_at": now + 4 * 3600 + 59 * 60}]}
     return s, status
 
 
@@ -274,7 +292,7 @@ def render(sid, transcript, width, height=40, demo=False):
     if width >= WIDE:
         rw = 62 if width >= 160 else 50
         lw = width - rw - 3
-        right = [header(rw, "Limits")] + limits_lines(rw, status, s, now, status.get("rate_limits") if demo else None) + [""]
+        right = [header(rw, "Limits")] + limits_lines(rw, status, s, now, status.get("rate_limits") if demo else None, status.get("agy") if demo else None) + [""]
         right += [header(rw, "Saved by routing")] + saved_lines(rw, s) + [""]
         right += [header(rw, "Tokens")] + tokens_lines(rw, s, body - len(right) - 1)
         left = [header(lw, "Requests")]
@@ -284,7 +302,7 @@ def render(sid, transcript, width, height=40, demo=False):
         lines = [pad(head, width)] + [f"{pad(a, lw)} {DIM}│{R} {pad(b, rw)}"
                                       for a, b in zip(left, right)]
     else:
-        panels = [header(width, "Limits")] + limits_lines(width, status, s, now, status.get("rate_limits") if demo else None)
+        panels = [header(width, "Limits")] + limits_lines(width, status, s, now, status.get("rate_limits") if demo else None, status.get("agy") if demo else None)
         panels += [header(width, "Saved by routing")] + saved_lines(width, s)
         feed_h = body - 1 - len(panels)
         if feed_h < 3:  # too short for everything: keep the feed, drop panels from the bottom
