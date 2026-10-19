@@ -177,6 +177,8 @@ def limits_lines(w, status, summary, now, q=None, agy=None):
         lines.append(f" {DIM}{label:<{lw}}{R} {bar(v / 100, bw, heat(v))}{heat(v)}{tail}{R}{mark}")
     if not pools:
         lines.append(f" {DIM}no limit data yet{R}")
+    else:
+        lines.append(f" {DIM}Argon, 3.8 Flash: not reported{R}")
     for prov in dict.fromkeys(key.split("|", 1)[0] for key in by if not key.startswith("Claude|")):
         if prov == "Antigravity":
             tok = sum(sum(c.values()) for key, c in by.items() if key.split("|", 1)[0] == prov)
