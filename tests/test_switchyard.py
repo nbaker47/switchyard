@@ -239,6 +239,28 @@ class CompressionAndGate(unittest.TestCase):
         self.assertIn("saved vs pure Opus", box)
         self.assertIn("preamble −75%", box)
 
+    def test_warm_standby_reuses_and_expires_after_3_idle_turns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cache = agy.CACHE
+            agy.CACHE = Path(tmp)
+            try:
+                agy.standby_record("claude-opus-5-5-medium", "conv-12345678", session_id="s1")
+                self.assertEqual(agy.standby_get("claude-opus-5-5-medium", session_id="s1")["conversation_id"], "conv-12345678")
+                # Tick 1, 2, 3 idle turns -> still warm
+                for expected_idle in (1, 2, 3):
+                    active, closed = agy.standby_tick(session_id="s1", max_idle=3)
+                    self.assertEqual(len(active), 1)
+                    self.assertEqual(active[0]["idle_turns"], expected_idle)
+                    self.assertEqual(len(closed), 0)
+                    self.assertIsNotNone(agy.standby_get("claude-opus-5-5-medium", session_id="s1", max_idle=3))
+                # Tick 4th idle turn -> auto-closed!
+                active, closed = agy.standby_tick(session_id="s1", max_idle=3)
+                self.assertEqual(len(active), 0)
+                self.assertEqual(len(closed), 1)
+                self.assertIsNone(agy.standby_get("claude-opus-5-5-medium", session_id="s1", max_idle=3))
+            finally:
+                agy.CACHE = old_cache
+
 
 class Tiers(unittest.TestCase):
     def test_resolve_from_live_list(self):

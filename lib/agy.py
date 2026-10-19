@@ -4,7 +4,12 @@ It runs your own, already signed-in `agy` in print mode. Your Antigravity login 
 read or forwarded. Models are never hard-coded: a tier is matched against the list that
 `agy models` returns for your account, so new models are picked up automatically.
 
-    cr agy [--tier auto|fast|cheap|strong|opus|sonnet|<model id>] [--effort LEVEL] [--bare] "task"
+Warm standby sessions: when you go back and forth on a brainstorm or multi-step task,
+`cr agy` keeps the Antigravity `conversation_id` on standby and resumes it (`--conversation`)
+without re-sending the CLAUDE.md preamble, then automatically closes it after 3 idle turns
+(`CR_STANDBY_TURNS=3`). Pass `--new` (or `CR_AGY_NO_STANDBY=1`) to force a fresh session.
+
+    cr agy [--tier auto|fast|cheap|strong|opus|sonnet|<model id>] [--new] [--effort LEVEL] [--bare] "task"
     cr agy --show-context [--compress]
     cr models
 """
@@ -25,6 +30,8 @@ import quota  # noqa: E402
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "switchyard"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "switchyard"
 MODELS_TTL = 6 * 3600
+STANDBY_TURNS = int(os.environ.get("CR_STANDBY_TURNS", "3"))
+STANDBY_TTL = int(os.environ.get("CR_STANDBY_TTL", "1800"))
 
 # A tier names a model family by keyword and the compute level to prefer within it.
 # Keywords, not ids, so "gemini-4-argon-high" and its successors match without edits.
@@ -45,6 +52,97 @@ CODE_KEYWORDS = {
     "fix", "bug", "implement", "refactor", "test", "tests", "failing", "edit",
     "update", "patch", "add", "change", "build", "error", "crash", "feature",
 }
+
+
+# ---- Warm Standby Session Manager (auto-expires after N idle turns) ----
+
+def _standby_file():
+    return CACHE / "standby.json"
+
+
+def _standby_scope(session_id=None, cwd=None):
+    sid = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    return f"session:{sid}" if sid else f"cwd:{Path(cwd or os.getcwd()).resolve()}"
+
+
+def _load_standby():
+    try:
+        return json.loads(_standby_file().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_standby_map(data):
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        tmp = _standby_file().with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, _standby_file())
+    except OSError:
+        pass
+
+
+def standby_tick(session_id=None, cwd=None, max_idle=None, now=None):
+    """Called on each UserPromptSubmit: increments idle_turns by 1 for warm sessions in this
+    scope and closes any session that has gone unused for `max_idle` turns (default 3) or TTL.
+    Returns `(active_list, closed_list)`.
+    """
+    max_idle = STANDBY_TURNS if max_idle is None else max_idle
+    now = time.time() if now is None else now
+    scope = _standby_scope(session_id, cwd)
+    data = _load_standby()
+    bucket = data.get(scope) or {}
+    kept, closed = {}, []
+    for model, entry in bucket.items():
+        idle = entry.get("idle_turns", 0) + 1
+        age = now - entry.get("ts", 0)
+        if idle > max_idle or age > STANDBY_TTL:
+            closed.append({**entry, "model": model, "reason": f"idle {idle - 1} turns"})
+        else:
+            kept[model] = {**entry, "idle_turns": idle, "max_idle": max_idle}
+    if kept:
+        data[scope] = kept
+    else:
+        data.pop(scope, None)
+    _save_standby_map(data)
+    return list(kept.values()), closed
+
+
+def standby_get(model, session_id=None, cwd=None, max_idle=None, now=None):
+    """Return warm standby entry for `model` in current scope if still within idle limit."""
+    max_idle = STANDBY_TURNS if max_idle is None else max_idle
+    now = time.time() if now is None else now
+    scope = _standby_scope(session_id, cwd)
+    bucket = (_load_standby().get(scope)) or {}
+    entry = bucket.get(model)
+    if not entry:
+        return None
+    if entry.get("idle_turns", 0) > max_idle or (now - entry.get("ts", 0)) > STANDBY_TTL:
+        return None
+    return {**entry, "max_idle": max_idle}
+
+
+def standby_record(model, conversation_id, session_id=None, cwd=None, now=None):
+    """Save or refresh a warm standby session, resetting `idle_turns` to 0."""
+    if not conversation_id:
+        return None
+    now = time.time() if now is None else now
+    scope = _standby_scope(session_id, cwd)
+    data = _load_standby()
+    bucket = data.setdefault(scope, {})
+    prev = bucket.get(model) or {}
+    turns = (prev.get("turns", 0) + 1) if prev.get("conversation_id") == conversation_id else 1
+    entry = {
+        "model": model,
+        "conversation_id": conversation_id,
+        "ts": now,
+        "idle_turns": 0,
+        "turns": turns,
+        "max_idle": STANDBY_TURNS,
+    }
+    bucket[model] = entry
+    _save_standby_map(data)
+    return entry
 
 
 def list_models(refresh=False):
@@ -113,7 +211,6 @@ def resolve(tier, models, task="", pools=None, force_claude=False):
             if tier == "opus":
                 new_tier = "strong"
             else:
-                # For sonnet work: use Argon if Gemini pool has plenty of room (<40%), else Flash
                 new_tier = "strong" if agy_g < 40 else "fast"
             try:
                 model = pick(new_tier, models)
@@ -351,9 +448,12 @@ def describe(step):
     return f"{step.get('tool_name') or info.get('name') or 'tool'} {detail[:70]}".rstrip()
 
 
-def run(task, model, effort=None, timeout=0, progress=print, preamble="", reason="", remapped_from=None):
+def run(task, model, effort=None, timeout=0, progress=print, preamble="", reason="",
+        remapped_from=None, conversation_id=None, comp_stats=None, standby_info=None):
     """Run agy, reporting each tool step as it happens, and return its final result."""
     cmd = ["agy", "--model", model, "--output-format", "stream-json"]
+    if conversation_id:
+        cmd += ["--conversation", conversation_id]
     if os.environ.get("CR_YOLO", "1") == "1":
         cmd.append("--dangerously-skip-permissions")
     else:
@@ -375,13 +475,13 @@ def run(task, model, effort=None, timeout=0, progress=print, preamble="", reason
             if event.get("event") == "result":
                 result = event.get("result") or {}
             step = event.get("step_update") or {}
-            if step.get("step_type") == "tool" and step.get("state") == "ACTIVE":
+            if step.get("step_type") == "tool" and step.get("state") == "ACTIVE" and progress:
                 if shown < MAX_PROGRESS:
                     progress(f"  ├─ {time.time() - started:4.0f}s  {describe(step)}")
                     shown += 1
                 else:
                     hidden += 1
-    if hidden:
+    if hidden and progress:
         progress(f"  ├─ … and {hidden} more steps")
     if not result:
         result = {"status": "ERROR", "response": "".join(other).strip() or "agy returned nothing"}
@@ -390,9 +490,11 @@ def run(task, model, effort=None, timeout=0, progress=print, preamble="", reason
         "ts": time.time(), "model": model, "status": result.get("status"),
         "seconds": round(time.time() - started, 1), "cwd": os.getcwd(),
         "session": os.environ.get("CLAUDE_CODE_SESSION_ID"),
-        "conversation": result.get("conversation_id"),
+        "conversation": result.get("conversation_id") or conversation_id,
+        "resumed": bool(conversation_id),
         "task": " ".join(task.split())[:120],
         "reason": reason, "remapped_from": remapped_from,
+        "comp_stats": comp_stats, "standby_info": standby_info,
         "input": usage.get("input_tokens", 0), "output": usage.get("output_tokens", 0),
         "thinking": usage.get("thinking_tokens", 0), "cached": usage.get("cache_read_tokens", 0),
     })
@@ -429,6 +531,9 @@ def main(argv=None):
     p.add_argument("--list", action="store_true", help="list models and how tiers resolve")
     p.add_argument("--bare", action="store_true",
                    help="no project context preamble (also CR_AGY_BARE=1)")
+    p.add_argument("--new", action="store_true",
+                   help="start a fresh agy session instead of reusing a warm standby session")
+    p.add_argument("--conversation", help="explicitly resume a specific agy conversation ID")
     p.add_argument("--full-context", action="store_true",
                    help="disable Caveman/skill compression on preamble")
     p.add_argument("--force-claude", action="store_true",
@@ -481,27 +586,76 @@ def main(argv=None):
     model, eff_tier, remapped_from, reason = resolve(
         a.tier, models, task=task, force_claude=a.force_claude
     )
-    print(flow.dispatch_banner(model, "Antigravity", reason=reason, remapped_from=remapped_from), flush=True)
+
+    # Check if a warm standby session exists for this model (unless --new or CR_AGY_NO_STANDBY=1).
+    standby_enabled = os.environ.get("CR_AGY_NO_STANDBY") != "1"
+    sb_entry = None
+    conv_id = a.conversation
+    if not conv_id and standby_enabled and not a.new:
+        sb_entry = standby_get(model)
+        if sb_entry:
+            conv_id = sb_entry["conversation_id"]
+            sb_entry = {**sb_entry, "turns": sb_entry.get("turns", 1) + 1, "resumed": True}
+
+    # Inside a Claude Code Bash tool call (non-TTY with CLAUDE_CODE_SESSION_ID set), the
+    # PreToolUse and PostToolUse hooks render the full flow graph via `systemMessage` (0 tokens!).
+    # Only print the ASCII box to stdout when running interactively in a terminal or CR_FLOW_STDOUT=1.
+    in_claude_tool = bool(os.environ.get("CLAUDE_CODE_SESSION_ID")) and not sys.stdout.isatty() \
+        and os.environ.get("CR_FLOW_STDOUT") != "1"
+
+    if not in_claude_tool:
+        print(flow.dispatch_banner(
+            model, "Antigravity", reason=reason, remapped_from=remapped_from, standby_info=sb_entry
+        ), flush=True)
+
     preamble = ""
     comp_stats = None
-    if not bare_requested(a.bare):
+    if conv_id:
+        if not in_claude_tool:
+            print(f"  ├─ ♻ reusing warm standby conversation {conv_id[:8]} (0 preamble tok; closes after {STANDBY_TURNS} idle turns)",
+                  flush=True)
+    elif not bare_requested(a.bare):
         preamble, comp_stats = build_context(task=task, use_compress=not a.full_context)
-        if preamble:
+        if preamble and not in_claude_tool:
             print(f"  ├─ {context_line(comp_stats)}", flush=True)
+
     t0 = time.time()
-    result = run(task, model, a.effort, a.timeout, lambda m: print(m, flush=True), preamble,
-                 reason=reason, remapped_from=remapped_from)
+    prog_fn = None if in_claude_tool else (lambda m: print(m, flush=True))
+    if conv_id:
+        result = run(task, model, a.effort, a.timeout, prog_fn, preamble,
+                     reason=reason, remapped_from=remapped_from, conversation_id=conv_id,
+                     comp_stats=comp_stats, standby_info=sb_entry)
+    else:
+        result = run(task, model, a.effort, a.timeout, prog_fn, preamble)
+    # If resuming a stale conversation failed, retry once fresh with preamble!
+    if conv_id and result.get("status") != "SUCCESS" and not a.conversation:
+        if not in_claude_tool:
+            print("  ├─ ↻ warm standby expired upstream; starting fresh agy session", flush=True)
+        conv_id, sb_entry = None, None
+        if not bare_requested(a.bare):
+            preamble, comp_stats = build_context(task=task, use_compress=not a.full_context)
+        result = run(task, model, a.effort, a.timeout, prog_fn, preamble)
+
+    if standby_enabled and result.get("status") == "SUCCESS" and result.get("conversation_id"):
+        saved_sb = standby_record(model, result["conversation_id"])
+        if sb_entry and saved_sb:
+            sb_entry = {**saved_sb, "resumed": True}
+        elif saved_sb:
+            sb_entry = {**saved_sb, "resumed": False}
+
     elapsed = result.get("duration_seconds") or (time.time() - t0)
-    print(flow.completion_box(
-        model=model,
-        provider="Antigravity",
-        status=result.get("status", "?"),
-        seconds=float(elapsed),
-        usage=result.get("usage") or {},
-        reason=reason,
-        remapped_from=remapped_from,
-        comp_stats=comp_stats,
-    ), flush=True)
+    if not in_claude_tool:
+        print(flow.completion_box(
+            model=model,
+            provider="Antigravity",
+            status=result.get("status", "?"),
+            seconds=float(elapsed),
+            usage=result.get("usage") or {},
+            reason=reason,
+            remapped_from=remapped_from,
+            comp_stats=comp_stats,
+            standby_info=sb_entry,
+        ), flush=True)
     print((result.get("response") or "").strip())
     return 0 if result.get("status") == "SUCCESS" else 1
 

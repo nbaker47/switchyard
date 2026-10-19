@@ -1,12 +1,12 @@
-"""UserPromptSubmit hook: tell the front desk the facts it needs to route, and show the user
-the live intake flow graph in the TUI.
+"""UserPromptSubmit hook: tell the front desk the facts it needs to route, tick/expire warm
+standby sessions after 3 idle turns, and show the user the live intake flow graph in the TUI.
 
 It does not guess a route. The front-desk model reads the request and decides, using the
 rules in prompts/router.md; it understands requests far better than keyword rules could, and
 it is reading the request anyway, so deciding there costs nothing extra. This hook adds
 what that model cannot see for itself: how full the Claude plan is (5h/7d usage + burn-rate
-pace), how full the Antigravity pools are (Claude vs Gemini), how large the conversation has
-grown, and which Antigravity models exist today.
+pace), how full the Antigravity pools are (Claude vs Gemini), which warm standby sessions
+are currently open, how large the conversation has grown, and which Antigravity models exist today.
 Each prompt is appended to routes.jsonl for `cr usage`, `cr dash` and `cr report`.
 """
 import json
@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+import agy  # noqa: E402
 import compress  # noqa: E402
 import flow  # noqa: E402
 import quota  # noqa: E402
@@ -50,10 +51,8 @@ def context_tokens(transcript_path):
 def agy_tiers():
     """How each agy tier resolves today, from the cached model list (never calls agy here)."""
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
-        import agy
         models = (CACHE / "agy-models.txt").read_text().split()
-    except (OSError, ImportError):
+    except OSError:
         return {}
     out = {}
     for tier in agy.TIERS:
@@ -100,7 +99,7 @@ def saver_state(q=None):
     }
 
 
-def facts(transcript_path, saver, tiers, balance=None):
+def facts(transcript_path, saver, tiers, balance=None, standby=None):
     """The context added to the prompt for the front desk."""
     ctx = context_tokens(transcript_path) if transcript_path else 0
     lines = [f"[switchyard] Context so far: ~{ctx // 1000}K tokens."]
@@ -133,6 +132,19 @@ def facts(transcript_path, saver, tiers, balance=None):
                     "to balance your subscriptions. Prefer `--tier strong`, `--tier fast`, or `--tier auto`."
                 )
             lines.append(pool_line)
+    if standby:
+        sb_desc = ", ".join(
+            f"{s['model']} (conv {s['conversation_id'][:8]}, turn #{s.get('turns', 1)}, "
+            f"idle {s.get('idle_turns', 0)}/{s.get('max_idle', 3)} turns)"
+            for s in standby
+        )
+        lines.append(
+            f"[switchyard] Warm standby agy sessions open: {sb_desc}. "
+            "Follow-up `cr agy` calls to the same tier automatically resume the warm session "
+            "with full prior context and 0 preamble overhead (send only the new delta/follow-up, "
+            "or pass `--new` if switching to an unrelated topic). Standby sessions auto-close after "
+            "3 idle turns."
+        )
     if tiers:
         lines.append("[switchyard] agy tiers today: " + ", ".join(f"{t}={m}" for t, m in tiers.items()) + ".")
     if ctx > CLEAR_AT:
@@ -142,9 +154,9 @@ def facts(transcript_path, saver, tiers, balance=None):
     return ctx, "\n".join(lines)
 
 
-def notice(ctx, saver, balance=None):
+def notice(ctx, saver, balance=None, standby=None):
     """The live intake flow graph line the user sees in the TUI for each prompt."""
-    return flow.intake_Banner(ctx, saver, balance=balance, clear_at=CLEAR_AT)
+    return flow.intake_Banner(ctx, saver, balance=balance, clear_at=CLEAR_AT, standby=standby)
 
 
 def _reset_turn_state(session_id, prompt):
@@ -182,22 +194,25 @@ def main():
     prompt = data.get("prompt") or ""
     if prompt.lstrip().startswith("<task-notification>"):
         return 0  # a background job reporting back, not a request from the user
-    _reset_turn_state(data.get("session_id"), prompt)
+    sid = data.get("session_id")
+    cwd = data.get("cwd")
+    _reset_turn_state(sid, prompt)
+    standby_active, _ = agy.standby_tick(session_id=sid, cwd=cwd)
     saver = saver_state()
     bal = quota.pool_balance()
-    ctx, text = facts(data.get("transcript_path"), saver, agy_tiers(), balance=bal)
+    ctx, text = facts(data.get("transcript_path"), saver, agy_tiers(), balance=bal, standby=standby_active)
     try:
         STATE.mkdir(parents=True, exist_ok=True)
         with open(STATE / "routes.jsonl", "a") as f:
-            f.write(json.dumps({"ts": time.time(), "session": data.get("session_id"),
+            f.write(json.dumps({"ts": time.time(), "session": sid,
                                 "route": None, "saver": saver["active"], "context": ctx,
-                                "cwd": data.get("cwd"), "transcript": data.get("transcript_path"),
+                                "cwd": cwd, "transcript": data.get("transcript_path"),
                                 "prompt": " ".join(prompt.split())[:120]}) + "\n")
     except OSError:
         pass
     out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}
     if os.environ.get("CR_NOTICE", "1") == "1":
-        out["systemMessage"] = notice(ctx, saver, balance=bal)
+        out["systemMessage"] = notice(ctx, saver, balance=bal, standby=standby_active)
     print(json.dumps(out))
     return 0
 

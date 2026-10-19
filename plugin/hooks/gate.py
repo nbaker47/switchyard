@@ -208,26 +208,25 @@ def handle_post_tool(data):
         r = _latest_agy_run(sid)
         s = Ledger(sid, tp).refresh().summary() if sid else None
         if r:
-            c = {
-                "input": r.get("input", 0),
-                "cache_read": r.get("cached", 0),
-                "output": r.get("output", 0) + r.get("thinking", 0),
-                "cache_write": 0,
-            }
-            call_saved = opus_cost(c)
-            model = r.get("model", "?")
-            rem = r.get("remapped_from")
-            why = r.get("reason") or "Antigravity hand-off"
-            label = f"{rem}→{short(model)}" if rem else short(model)
-            sess_txt = (
-                f" │ session saved: ${s['saved']:.2f} (−{s['saved_pct']:.0f}% vs all-Opus)"
-                if s and s.get("baseline") else ""
+            box = flow.completion_box(
+                model=r.get("model", "?"),
+                provider="Antigravity",
+                status=r.get("status", "SUCCESS"),
+                seconds=float(r.get("seconds", 0)),
+                usage={
+                    "input": r.get("input", 0),
+                    "cached": r.get("cached", 0),
+                    "output": r.get("output", 0),
+                    "thinking": r.get("thinking", 0),
+                },
+                reason=r.get("reason") or "Antigravity hand-off",
+                remapped_from=r.get("remapped_from"),
+                comp_stats=r.get("comp_stats"),
+                standby_info=r.get("standby_info"),
             )
-            msg = (
-                f"╭─ ⇄ flow complete: [prompt] ──► [{desk} desk] ──► [Antigravity: {label}] ──► [✓ {r.get('seconds', 0):.1f}s]\n"
-                f"╰─ why: {why} │ 💰 saved ${call_saved:.3f} vs pure Opus{sess_txt}"
-            )
-            return {"systemMessage": msg}
+            if s and s.get("baseline"):
+                box += f"\n  session total saved vs all-Opus: 💰 ${s['saved']:.2f} (−{s['saved_pct']:.0f}%)"
+            return {"systemMessage": box}
 
     if tool in ("Agent", "Task"):
         s = Ledger(sid, tp).refresh().summary() if sid else None

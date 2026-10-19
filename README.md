@@ -134,11 +134,12 @@ list prices, used only as weights.
 |---|---|---|
 | `CR_FRONT_MODEL` | `haiku` | front-desk dispatcher model |
 | `CR_SAFE` | `0` | `1` turns yolo mode off |
-| `CR_AUTOCOMPACT` | `50k` | auto-compact threshold |
+| `CR_AUTOCOMPACT` | `100k` | auto-compact threshold (Claude Code minimum is `100k`) |
 | `CR_CLEAR_AT` | `50000` | context size (tokens) at which the hook suggests `/clear` |
 | `CR_SAVER_AT` | `80` | Claude plan usage (%) at which saver mode starts |
 | `CR_PACE_PROJ_AT` | `105` | projected 7-day usage (%) at which pace saver starts early |
 | `CR_AGY_SHIFT_AT` | `45` | Antigravity Claude pool (%) at which work shifts to Gemini Argon/Flash |
+| `CR_STANDBY_TURNS` | `3` | idle turns to keep a warm `cr agy` conversation on standby before closing |
 | `CR_ENFORCE_DISPATCH` | `1` | `0` disables the `PreToolUse` front-desk edit/read gate |
 | `CR_NOTICE` | `1` | `0` hides the per-prompt and tool routing flow notices |
 

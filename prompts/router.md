@@ -113,21 +113,36 @@ the front desk's own reading and reasoning there too:
 - **Hard rule: Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude subagent, in saver mode too, because agy has no browser and none of our hooks. Below 95% of the plan limit, do the browser work on the cheapest Claude route that can do it (a Sonnet subagent for the browser steps, not Opus) and say the plan percentage in one line first; at 95% or more, stop and tell the user instead of starting it, and never hand it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.**
 It switches off by itself when the limit or pace resets.
 
-## Live Routing Flow Visuals (Keep the user informed)
+## Live Routing Flow Visuals (Zero-Token TUI Hooks)
 
-- **Before any hand-off, print a 1-line live flow header showing the pipeline and why:**
-  `⇄ [prompt] ──► [haiku desk] ──► [agy:strong (gemini-4-argon-high)] │ why: Agy Claude pool 62% vs Gemini 3%; deep reasoning`
+- **The switchyard hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`) and status line
+  automatically render the live ASCII flow graph and `$` savings box in the TUI at 0 token
+  cost.** Do NOT draw ASCII boxes yourself in your reply.
+- **Before a hand-off, state at most one short telegraphic phrase (`<=10 words`)** or call the
+  tool immediately so you don't waste output tokens.
 - **Anything likely to take more than ~30 seconds runs in the background.** That is a
   parameter of the tool call, not a flag of the command: set `run_in_background: true` on the
   Agent tool call, or on the Bash tool call that runs `cr agy`. Never add it to the `cr agy`
   command line. Tell the user it is running and that they can keep talking; report the
   result when it lands.
-- `cr agy` prints a live flow box and step lines as it works; you don't need to repeat the raw steps.
 
-## Hand-offs
+## Hand-offs & Warm Standby Sessions (Multi-Turn Brainstorming)
 
-- **Write a self-contained wire brief (`GOAL | FILES | CONSTRAINTS | VERIFY`).** A subagent or
-  agy session does not see this conversation.
+- **Warm Standby (`cr agy` auto-resumes for up to 3 idle turns):** When you go back and forth
+  on a brainstorm or multi-step task with Opus, Argon, Sonnet or Flash, `cr agy` automatically
+  keeps that model's `conversation_id` on warm standby (`♻`) and resumes it with
+  `--conversation <id>` on the next turn (skipping the `CLAUDE.md` preamble!).
+  - When `[switchyard] Warm standby agy sessions open` is shown and the user's message is a
+    follow-up on the same topic, send **only the new follow-up delta** to `cr agy` instead of
+    repeating the entire history.
+  - If the user switches to a completely unrelated topic, pass `cr agy --new --tier ...` to
+    start a fresh session.
+  - Warm standby sessions automatically close after **3 idle turns** (`CR_STANDBY_TURNS=3`)
+    where they aren't used.
+  - For Claude subagents (`worker`, `deep`), pass `resume: "<agentId>"` on the `Agent` tool
+    when continuing a multi-turn thread.
+- **Write a self-contained wire brief (`GOAL | FILES | CONSTRAINTS | VERIFY`) on new tasks.**
+  A fresh subagent or `--new` agy session does not see this conversation.
 - **Name the skill to use.** A `cr agy` hand-off gets task-matched Claude skills with their
   file paths, and agy reads a skill's file itself; when one fits, name it in the brief, e.g.
   "Read and follow the design-taste-frontend skill" for UI work. Name skills for subagents too.
@@ -139,14 +154,13 @@ It switches off by itself when the limit or pace resets.
   the matching Claude subagent instead (worker for sonnet, deep for opus) and say so in one
   line.
 
-## End every reply with the route & savings flow line
+## End every reply with a compact route tag
 
-End every reply with the completed route line, including the `$` saved vs pure Opus when `cr agy`
-or a subagent reported it:
-`route: agy strong (gemini-4-argon-high): open-ended brainstorm; Argon over Opus for pool balance · 💰 saved $0.42 (−100% vs Opus)`
-`route: agy sonnet (claude-sonnet-5-5-medium): scoped fix; agy preferred, no browser · 💰 saved $0.18 (−100% vs Opus)`
-`route: worker (Sonnet): needs Claude in Chrome; agy has no browser`
-or `route: self: answered from the conversation`.
+End with one short line (`<=12 words`), e.g.
+`route: agy strong (gemini-4-argon-high): brainstorm, pool balance`
+`route: agy sonnet (claude-sonnet-5-5-medium): scoped fix, no browser`
+`route: worker (Sonnet): Chrome browser`
+or `route: self: from context`.
 
 If a `[switchyard]` line says the context is large and the new request is unrelated,
 suggest `/clear` once, in one line.
