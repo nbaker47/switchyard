@@ -32,6 +32,7 @@ CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "switch
 MODELS_TTL = 6 * 3600
 STANDBY_TURNS = int(os.environ.get("CR_STANDBY_TURNS", "3"))
 STANDBY_TTL = int(os.environ.get("CR_STANDBY_TTL", "1800"))
+STANDBY_COMPACT_AT = int(os.environ.get("CR_STANDBY_COMPACT_AT", "100000"))
 
 # A tier names a model family by keyword and the compute level to prefer within it.
 # Keywords, not ids, so "gemini-4-argon-high" and its successors match without edits.
@@ -54,7 +55,7 @@ CODE_KEYWORDS = {
 }
 
 
-# ---- Warm Standby Session Manager (auto-expires after N idle turns) ----
+# ---- Warm Standby Session Manager (auto-expires after N idle turns + autocompacts at 100k) ----
 
 def _standby_file():
     return CACHE / "standby.json"
@@ -108,9 +109,12 @@ def standby_tick(session_id=None, cwd=None, max_idle=None, now=None):
     return list(kept.values()), closed
 
 
-def standby_get(model, session_id=None, cwd=None, max_idle=None, now=None):
-    """Return warm standby entry for `model` in current scope if still within idle limit."""
+def standby_get(model, session_id=None, cwd=None, max_idle=None, compact_at=None, now=None):
+    """Return warm standby entry for `model` in current scope if still within idle limit.
+    Sets `entry['autocompact'] = True` when `context_tokens >= compact_at` (default 100k).
+    """
     max_idle = STANDBY_TURNS if max_idle is None else max_idle
+    compact_at = STANDBY_COMPACT_AT if compact_at is None else compact_at
     now = time.time() if now is None else now
     scope = _standby_scope(session_id, cwd)
     bucket = (_load_standby().get(scope)) or {}
@@ -119,11 +123,19 @@ def standby_get(model, session_id=None, cwd=None, max_idle=None, now=None):
         return None
     if entry.get("idle_turns", 0) > max_idle or (now - entry.get("ts", 0)) > STANDBY_TTL:
         return None
-    return {**entry, "max_idle": max_idle}
+    ctx_tok = entry.get("context_tokens", 0) or 0
+    return {
+        **entry,
+        "max_idle": max_idle,
+        "autocompact": bool(compact_at and ctx_tok >= compact_at),
+    }
 
 
-def standby_record(model, conversation_id, session_id=None, cwd=None, now=None):
-    """Save or refresh a warm standby session, resetting `idle_turns` to 0."""
+def standby_record(model, conversation_id, session_id=None, cwd=None, now=None,
+                   context_tokens=0, response_text="", provider="Antigravity"):
+    """Save or refresh a warm standby session (for either Antigravity or Claude Code subagents),
+    resetting `idle_turns` to 0 and storing `context_tokens` + a compact digest for 100k autocompact.
+    """
     if not conversation_id:
         return None
     now = time.time() if now is None else now
@@ -132,13 +144,20 @@ def standby_record(model, conversation_id, session_id=None, cwd=None, now=None):
     bucket = data.setdefault(scope, {})
     prev = bucket.get(model) or {}
     turns = (prev.get("turns", 0) + 1) if prev.get("conversation_id") == conversation_id else 1
+    digest = prev.get("digest", "")
+    if response_text:
+        comp = compress.compress_markdown(response_text)
+        digest = " ".join(comp.split())[:600]
     entry = {
         "model": model,
+        "provider": provider,
         "conversation_id": conversation_id,
         "ts": now,
         "idle_turns": 0,
         "turns": turns,
         "max_idle": STANDBY_TURNS,
+        "context_tokens": int(context_tokens or prev.get("context_tokens", 0) or 0),
+        "digest": digest,
     }
     bucket[model] = entry
     _save_standby_map(data)
@@ -598,8 +617,16 @@ def main(argv=None):
     if not conv_id and standby_enabled and not a.new:
         sb_entry = standby_get(model)
         if sb_entry:
-            conv_id = sb_entry["conversation_id"]
-            sb_entry = {**sb_entry, "turns": sb_entry.get("turns", 1) + 1, "resumed": True}
+            if sb_entry.get("autocompact"):
+                # Warm session reached 100k token autocompact ceiling -> roll over to fresh session with digest
+                old_tok = sb_entry.get("context_tokens", 0)
+                digest = sb_entry.get("digest", "")
+                if digest:
+                    task = f"[Autocompacted prior standby context (~{old_tok // 1000}K tok): {digest}]\n\n{task}"
+                sb_entry = {**sb_entry, "turns": 1, "resumed": False, "compacted_from": old_tok}
+            else:
+                conv_id = sb_entry["conversation_id"]
+                sb_entry = {**sb_entry, "turns": sb_entry.get("turns", 1) + 1, "resumed": True}
 
     # Inside a Claude Code Bash tool call (non-TTY with CLAUDE_CODE_SESSION_ID set), the
     # PreToolUse and PostToolUse hooks render the full flow graph via `systemMessage` (0 tokens!).
@@ -619,6 +646,9 @@ def main(argv=None):
             print(f"  ├─ ♻ reusing warm standby conversation {conv_id[:8]} (0 preamble tok; closes after {STANDBY_TURNS} idle turns)",
                   flush=True)
     elif not bare_requested(a.bare):
+        if sb_entry and sb_entry.get("compacted_from") and not in_claude_tool:
+            print(f"  ├─ ♻ autocompacted warm standby ({sb_entry['compacted_from'] // 1000}K tok → fresh session with digest)",
+                  flush=True)
         preamble, comp_stats = build_context(task=task, use_compress=not a.full_context)
         if preamble and not in_claude_tool:
             print(f"  ├─ {context_line(comp_stats)}", flush=True)
@@ -631,7 +661,8 @@ def main(argv=None):
                      comp_stats=comp_stats, standby_info=sb_entry)
     else:
         result = run(task, model, a.effort, a.timeout, prog_fn, preamble,
-                     reason=reason, remapped_from=remapped_from, comp_stats=comp_stats)
+                     reason=reason, remapped_from=remapped_from, comp_stats=comp_stats,
+                     standby_info=sb_entry)
     # If resuming a stale conversation failed, retry once fresh with preamble!
     if conv_id and result.get("status") != "SUCCESS" and not a.conversation:
         if not in_claude_tool:
@@ -643,11 +674,21 @@ def main(argv=None):
                      reason=reason, remapped_from=remapped_from, comp_stats=comp_stats)
 
     if standby_enabled and result.get("status") == "SUCCESS" and result.get("conversation_id"):
-        saved_sb = standby_record(model, result["conversation_id"])
-        if sb_entry and saved_sb:
+        u = result.get("usage") or {}
+        ctx_tok = (u.get("input_tokens", 0) or 0) + (u.get("cache_read_tokens", 0) or 0)
+        saved_sb = standby_record(
+            model, result["conversation_id"],
+            context_tokens=ctx_tok, response_text=result.get("response") or "",
+            provider="Antigravity",
+        )
+        if sb_entry and sb_entry.get("resumed") and saved_sb:
             sb_entry = {**saved_sb, "resumed": True}
         elif saved_sb:
-            sb_entry = {**saved_sb, "resumed": False}
+            sb_entry = {
+                **saved_sb,
+                "resumed": False,
+                "compacted_from": (sb_entry or {}).get("compacted_from"),
+            }
 
     elapsed = result.get("duration_seconds") or (time.time() - t0)
     if not in_claude_tool:

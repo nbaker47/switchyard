@@ -247,11 +247,13 @@ class CompressionAndGate(unittest.TestCase):
 
     def test_warm_standby_reuses_and_expires_after_3_idle_turns(self):
         with tempfile.TemporaryDirectory() as tmp:
-            old_cache = agy.CACHE
-            agy.CACHE = Path(tmp)
+            old_cache, old_gate_agy = agy.CACHE, gate.agy.CACHE
+            agy.CACHE = gate.agy.CACHE = Path(tmp)
             try:
-                agy.standby_record("claude-opus-5-5-medium", "conv-12345678", session_id="s1")
-                self.assertEqual(agy.standby_get("claude-opus-5-5-medium", session_id="s1")["conversation_id"], "conv-12345678")
+                agy.standby_record("claude-opus-5-5-medium", "conv-12345678", session_id="s1", context_tokens=25000)
+                sb = agy.standby_get("claude-opus-5-5-medium", session_id="s1")
+                self.assertEqual(sb["conversation_id"], "conv-12345678")
+                self.assertFalse(sb["autocompact"])
                 # Tick 1, 2, 3 idle turns -> still warm
                 for expected_idle in (1, 2, 3):
                     active, closed = agy.standby_tick(session_id="s1", max_idle=3)
@@ -264,8 +266,31 @@ class CompressionAndGate(unittest.TestCase):
                 self.assertEqual(len(active), 0)
                 self.assertEqual(len(closed), 1)
                 self.assertIsNone(agy.standby_get("claude-opus-5-5-medium", session_id="s1", max_idle=3))
+
+                # Claude Code subagent warm standby auto-resume + 100k autocompact rollover
+                agy.standby_record(
+                    "claude:switchyard:deep", "agent-opus99", session_id="s1",
+                    context_tokens=40000, response_text="Brainstormed 5 gameshow ideas", provider="Claude",
+                )
+                pre_warm = gate.handle_pre_tool({
+                    "session_id": "s1", "tool_name": "Agent",
+                    "tool_input": {"subagent_type": "switchyard:deep", "description": "follow up", "prompt": "pick #2"}
+                })
+                self.assertEqual(pre_warm["hookSpecificOutput"]["updatedInput"]["resume"], "agent-opus99")
+
+                # When context_tokens >= 100k, autocompact rolls over to a fresh subagent with digest!
+                agy.standby_record(
+                    "claude:switchyard:deep", "agent-opus99", session_id="s1",
+                    context_tokens=115000, response_text="Brainstormed 5 gameshow ideas", provider="Claude",
+                )
+                pre_compact = gate.handle_pre_tool({
+                    "session_id": "s1", "tool_name": "Agent",
+                    "tool_input": {"subagent_type": "switchyard:deep", "description": "follow up", "prompt": "pick #2"}
+                })
+                self.assertNotIn("resume", pre_compact["hookSpecificOutput"]["updatedInput"])
+                self.assertIn("Autocompacted prior standby context (~115K tok)", pre_compact["hookSpecificOutput"]["updatedInput"]["prompt"])
             finally:
-                agy.CACHE = old_cache
+                agy.CACHE, gate.agy.CACHE = old_cache, old_gate_agy
 
 
 class Tiers(unittest.TestCase):

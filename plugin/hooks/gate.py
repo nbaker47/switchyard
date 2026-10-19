@@ -130,11 +130,42 @@ def handle_pre_tool(data):
         sub_type = inp.get("subagent_type") or "subagent"
         desc = (inp.get("description") or "").strip()
         bal = quota.pool_balance()
+        short_type = sub_type.split(":")[-1]
+        sb = None
+        updated_inp = None
+        if (
+            os.environ.get("CR_AGY_NO_STANDBY") != "1"
+            and short_type in ("worker", "deep")
+            and not inp.get("resume")
+            and "--new" not in desc
+        ):
+            sb = agy.standby_get(f"claude:{sub_type}", session_id=data.get("session_id"), cwd=data.get("cwd"))
+            if sb:
+                if sb.get("autocompact"):
+                    old_tok = sb.get("context_tokens", 0)
+                    digest = sb.get("digest", "")
+                    if digest and inp.get("prompt"):
+                        updated_inp = {
+                            **inp,
+                            "prompt": f"[Autocompacted prior standby context (~{old_tok // 1000}K tok): {digest}]\n\n{inp['prompt']}",
+                        }
+                    sb = {**sb, "turns": 1, "resumed": False, "compacted_from": old_tok}
+                else:
+                    updated_inp = {**inp, "resume": sb["conversation_id"]}
+                    sb = {**sb, "turns": sb.get("turns", 1) + 1, "resumed": True}
         msg = flow.dispatch_banner(
             sub_type, "Claude", reason=desc or "browser / Claude-only tooling or scout lookup",
-            tier=sub_type.split(":")[-1], balance=bal,
+            standby_info=sb if (sb and sb.get("resumed")) else None,
+            tier=short_type, balance=bal,
         )
-        return {"systemMessage": msg} if os.environ.get("CR_NOTICE", "1") == "1" else {}
+        out = {"systemMessage": msg} if os.environ.get("CR_NOTICE", "1") == "1" else {}
+        if updated_inp:
+            out["hookSpecificOutput"] = {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": updated_inp,
+            }
+        return out
 
     if not enforce:
         return {}
@@ -212,6 +243,45 @@ def _latest_agy_run(session_id):
     return None
 
 
+def _record_claude_subagent_standby(data):
+    """Record the latest Claude subagent (`worker`/`deep`) agentId & context tokens for warm standby."""
+    if os.environ.get("CR_AGY_NO_STANDBY") == "1":
+        return None
+    inp = data.get("tool_input") or {}
+    sub_type = inp.get("subagent_type") or "subagent"
+    if sub_type.split(":")[-1] not in ("worker", "deep"):
+        return None
+    tp = data.get("transcript_path")
+    agent_id = inp.get("resume")
+    ctx_tok = 0
+    if tp:
+        sub_dir = Path(tp).with_suffix("") / "subagents"
+        if sub_dir.is_dir():
+            jfiles = sorted(sub_dir.glob("agent-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if jfiles:
+                latest_f = jfiles[0]
+                if not agent_id:
+                    agent_id = latest_f.stem.replace("agent-", "", 1)
+                try:
+                    for line in reversed(latest_f.read_text(errors="ignore").splitlines()):
+                        if '"usage"' in line:
+                            u = json.loads(line).get("message", {}).get("usage") or {}
+                            ctx_tok = (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0) \
+                                + (u.get("cache_creation_input_tokens") or 0)
+                            break
+                except (OSError, ValueError):
+                    pass
+    resp = data.get("tool_response")
+    resp_txt = json.dumps(resp) if isinstance(resp, dict) else str(resp or "")
+    if agent_id:
+        return agy.standby_record(
+            f"claude:{sub_type}", agent_id,
+            session_id=data.get("session_id"), cwd=data.get("cwd"),
+            context_tokens=ctx_tok, response_text=resp_txt[:1500], provider="Claude",
+        )
+    return None
+
+
 def handle_post_tool(data):
     if is_subagent(data) or os.environ.get("CR_NOTICE", "1") != "1":
         return {}
@@ -248,6 +318,7 @@ def handle_post_tool(data):
             return {"systemMessage": box}
 
     if tool in ("Agent", "Task"):
+        sb_rec = _record_claude_subagent_standby(data)
         s = Ledger(sid, tp).refresh().summary() if sid else None
         last = s.get("last") if s else None
         bal = quota.pool_balance()
@@ -257,10 +328,11 @@ def handle_post_tool(data):
                 f" │ session saved: ${s['saved']:.2f} (−{s['saved_pct']:.0f}% vs all-Opus)"
                 if s and s.get("baseline") else ""
             )
+            sb_txt = f" ♻#{sb_rec['turns']}" if sb_rec and sb_rec.get("turns", 1) > 1 else ""
             q_txt = flow.quota_rationale(bal)
             q_line = f"│  quota: {q_txt}\n" if q_txt else ""
             msg = (
-                f"╭─ ⇄ flow complete: [prompt] ──► [{desk} desk] ──► [Claude: {last.get('route')} ({last.get('model')})] ──► [✓ {last.get('seconds', 0):.1f}s]\n"
+                f"╭─ ⇄ flow complete: [prompt] ──► [{desk} desk] ──► [Claude: {last.get('route')}{sb_txt} ({last.get('model')})] ──► [✓ {last.get('seconds', 0):.1f}s]\n"
                 f"{q_line}"
                 f"╰─ 💰 saved ${call_saved:.3f} vs pure Opus{sess_txt}"
             )
