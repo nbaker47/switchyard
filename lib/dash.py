@@ -142,12 +142,16 @@ def feed_rows(requests, fw, rows, now):
 
 
 def limits_lines(w, status, summary, now, q=None, agy=None):
-    """One bar per window per plugged-in provider, plus saver mode."""
+    """One bar per window per plugged-in provider, plus saver mode and pool shift."""
     q = q or quota.latest() or (status.get("rate_limits") or {})
+    pools = agy if agy is not None else agy_quota.latest()
+    bal = quota.pool_balance(q if q else None, pools, now=now)
     lines = []
     active, pct = quota.saver(q if q else None) if q else (False, None)
-    on = f"{RED}{B}ON{R}" if active else f"{DIM}OFF{R}"
-    lines.append(f"{B}Claude{R} {DIM}saver{R} {on}" + (f" {DIM}(at {quota.SAVER_AT:.0f}%){R}" if w >= 40 else ""))
+    pace_hot = bal.get("pace", {}).get("hot", False)
+    on = f"{RED}{B}ON{R}" if (active or pace_hot) else f"{DIM}OFF{R}"
+    tag = "pace" if (pace_hot and not active) else f"at {quota.SAVER_AT:.0f}%"
+    lines.append(f"{B}Claude{R} {DIM}saver{R} {on}" + (f" {DIM}({tag}){R}" if w >= 40 else ""))
     wins = [("5h", "five_hour"), ("7d", "seven_day")]
     shown = False
     for name, key in wins:
@@ -164,8 +168,8 @@ def limits_lines(w, status, summary, now, q=None, agy=None):
     if not shown:
         lines.append(f" {DIM}no limit data yet{R}")
     by = summary["by"]
-    lines.append(f"{MAGENTA}{B}Antigravity{R}")
-    pools = agy if agy is not None else agy_quota.latest()
+    shift_tag = f" {CYAN}⚡→Gemini{R}" if bal.get("shift_to_gemini") and w >= 36 else ""
+    lines.append(f"{MAGENTA}{B}Antigravity{R}{shift_tag}")
     for p in pools:
         v = p["used"]
         rs = until(p.get("resets_at"), now)

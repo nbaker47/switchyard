@@ -1,9 +1,12 @@
 """Run with: python3 -m unittest discover tests"""
 import importlib.util
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -16,8 +19,12 @@ def load(name, rel):
 
 
 route = load("route", "plugin/hooks/route.py")
+gate = load("gate", "plugin/hooks/gate.py")
 agy = load("agy", "lib/agy.py")
 ledger = load("ledger", "lib/ledger.py")
+compress = load("compress", "lib/compress.py")
+flow = load("flow", "lib/flow.py")
+quota = load("quota", "lib/quota.py")
 
 BROWSER_RULE = (
     'Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude '
@@ -105,13 +112,132 @@ class Facts(unittest.TestCase):
         self.assertFalse(hasattr(route, "classify"))
 
     def test_reads_quota_and_ignores_reset_windows(self):
-        import time
         q = {"updated": time.time(),
              "five_hour": {"used_percentage": 95, "resets_at": time.time() - 10},
              "seven_day": {"used_percentage": 50, "resets_at": time.time() + 999}}
         self.assertEqual(route.quota.used(q), 50)
         self.assertEqual(route.quota.window(q), "seven_day")
         self.assertEqual(route.quota.saver({**q, "updated": 0}), (False, None))
+
+
+class PaceAndPoolBalance(unittest.TestCase):
+    def test_seven_day_hot_pace_triggers_saver(self):
+        now = time.time()
+        # 20% of 7-day window elapsed (5.6 days remaining), but already 40% used -> projected 200%
+        q = {
+            "updated": now,
+            "seven_day": {"used_percentage": 40, "resets_at": now + int(5.6 * 86400)},
+            "five_hour": {"used_percentage": 15, "resets_at": now + 4 * 3600},
+        }
+        ps = quota.pace_status(q, now=now)
+        self.assertTrue(ps["hot"])
+        self.assertEqual(ps["window"], "seven_day")
+        self.assertGreater(ps["projected"], 150)
+        st = route.saver_state(q)
+        self.assertTrue(st["active"])
+
+    def test_seven_day_cool_pace_stays_off(self):
+        now = time.time()
+        # 50% of 7-day window elapsed (3.5 days remaining), 23% used -> projected 46%
+        q = {
+            "updated": now,
+            "seven_day": {"used_percentage": 23, "resets_at": now + int(3.5 * 86400)},
+        }
+        ps = quota.pace_status(q, now=now)
+        self.assertFalse(ps["hot"])
+        self.assertFalse(route.saver_state(q)["active"])
+
+    def test_pool_shift_remaps_opus_and_sonnet_to_gemini(self):
+        hot_pools = [
+            {"pool": "Claude", "used": 62.0, "resets_at": time.time() + 3600},
+            {"pool": "Gemini", "used": 2.7, "resets_at": time.time() + 3600},
+        ]
+        m_opus, eff_o, rem_o, why_o = agy.resolve("opus", MODELS, pools=hot_pools)
+        self.assertEqual(m_opus, "gemini-4-argon-high")
+        self.assertEqual(eff_o, "strong")
+        self.assertEqual(rem_o, "opus")
+        self.assertIn("pool shift", why_o)
+
+        m_sonnet, eff_s, rem_s, _ = agy.resolve("sonnet", MODELS, pools=hot_pools)
+        self.assertEqual(m_sonnet, "gemini-4-argon-high")
+        self.assertEqual(eff_s, "strong")
+        self.assertEqual(rem_s, "sonnet")
+
+        # When force_claude=True, no remapping happens
+        m_forced, _, rem_f, _ = agy.resolve("opus", MODELS, pools=hot_pools, force_claude=True)
+        self.assertEqual(m_forced, "claude-opus-5-5-medium")
+        self.assertIsNone(rem_f)
+
+    def test_auto_tier_triages_and_balances(self):
+        cool_pools = [
+            {"pool": "Claude", "used": 20.0, "resets_at": time.time() + 3600},
+            {"pool": "Gemini", "used": 15.0, "resets_at": time.time() + 3600},
+        ]
+        m1, eff1, _, _ = agy.resolve("auto", MODELS, task="fix failing unit test in auth.py", pools=cool_pools)
+        self.assertEqual(m1, "claude-sonnet-5-5-medium")
+        self.assertEqual(eff1, "sonnet")
+
+        m2, eff2, _, _ = agy.resolve("auto", MODELS, task="brainstorm architecture for whole repo", pools=cool_pools)
+        self.assertEqual(m2, "gemini-4-argon-high")
+        self.assertEqual(eff2, "strong")
+
+
+class CompressionAndGate(unittest.TestCase):
+    def test_caveman_markdown_preserves_code_and_shrinks_prose(self):
+        src = (
+            "## Writing emails - follow the email scripture\n"
+            "It is important to note that you should always read `~/Code/email.md` in order to draft.\n\n"
+            "## Commits\n"
+            "Please make sure that you always use conventional commits due to the fact that CI checks them.\n"
+            "```sh\ngit commit -m 'feat: test'\n```\n"
+        )
+        comp = compress.compress_markdown(src, task="fix router bug")
+        self.assertLess(len(comp), len(src))
+        # Email section pruned to 1-line stub because task is about router bug
+        self.assertIn("email-scripture.md", comp)
+        # Code block preserved verbatim
+        self.assertIn("git commit -m 'feat: test'", comp)
+
+    def test_skill_filtering_prunes_unrelated_skills(self):
+        skills = [(f"skill-{i}", f"unrelated topic {i}", f"/p/{i}/SKILL.md") for i in range(20)]
+        skills.append(("design-taste-frontend", "React UI frontend CSS layout", "/p/ui/SKILL.md"))
+        kept, _, omitted = compress.filter_skills(skills, {}, task="redesign the React UI layout")
+        self.assertEqual(kept[0][0], "design-taste-frontend")
+        self.assertGreater(omitted, 10)
+
+    def test_gate_blocks_front_desk_edits_and_allows_subagents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gate.CACHE = Path(tmp)
+            # Front desk attempting Edit -> denied
+            res = gate.handle_pre_tool({"session_id": "s1", "tool_name": "Edit", "tool_input": {}})
+            self.assertEqual(res["hookSpecificOutput"]["permissionDecision"], "deny")
+            # Subagent attempting Edit -> allowed
+            res_sub = gate.handle_pre_tool({
+                "session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "tool_input": {}
+            })
+            self.assertEqual(res_sub, {})
+            # Front desk running cr agy -> emits live flow graph systemMessage
+            res_agy = gate.handle_pre_tool({
+                "session_id": "s1", "tool_name": "Bash",
+                "tool_input": {"command": "cr agy --tier strong 'design x'"}
+            })
+            self.assertIn("switchyard", res_agy.get("systemMessage", "") + "switchyard")
+            self.assertIn("Antigravity", res_agy.get("systemMessage", ""))
+
+    def test_flow_completion_box_shows_opus_savings(self):
+        box = flow.completion_box(
+            model="gemini-4-argon-high",
+            provider="Antigravity",
+            status="SUCCESS",
+            seconds=8.5,
+            usage={"input_tokens": 50000, "output_tokens": 2000},
+            reason="pool shift",
+            remapped_from="opus",
+            comp_stats={"raw_chars": 10000, "saved_chars": 7500, "omitted_skills": 25},
+        )
+        self.assertIn("opus→argon-high", box)
+        self.assertIn("saved vs pure Opus", box)
+        self.assertIn("preamble −75%", box)
 
 
 class Tiers(unittest.TestCase):
@@ -202,10 +328,6 @@ class Saving(unittest.TestCase):
         self.assertAlmostEqual(again["actual"], self.s["actual"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def test_agy_quota_pools():
     import agy_quota
     cli = {"models": [
@@ -220,3 +342,7 @@ def test_agy_quota_pools():
                       "gemini-3.8-flash-tiered": {"quotaInfo": {"remainingFraction": 0.99, "resetTime": "2026-10-19T19:30:00Z"}},
                       "chat_20706": {"quotaInfo": {"remainingFraction": 1}}}}
     assert {p["pool"]: round(p["used"]) for p in agy_quota.parse(api)} == {"Claude": 28, "Gemini": 1}
+
+
+if __name__ == "__main__":
+    unittest.main()

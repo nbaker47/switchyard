@@ -66,119 +66,81 @@ when there are no `CLAUDE.md` files and no skills. A line such as
 `context: 3 CLAUDE.md, 41 skills, ~9.2k tokens (chars/4)` shows what it costs.
 
 - `--bare` or `CR_AGY_BARE=1` skips the preamble.
-- `--show-context` prints the preamble and exits without calling agy.
+- `--full-context` or `CR_AGY_FULL_CONTEXT=1` disables the Caveman/TOON markdown compressor and task-matched skill filter.
+- `--show-context [--compress]` prints the preamble (raw or compressed) and exits without calling agy.
 - `CR_AGY_CONTEXT_MAX_CHARS` (default `120000`): above it, the largest `CLAUDE.md` files are
   replaced by a path pointer, and the preamble says so.
 
-## Seeing the routing
+## Seeing the routing (Live Dynamic Flow Graph)
 
-- **In the chat:** each prompt shows a notice such as
-  `⇄ reading request · ⛽ saver mode (7-day 91%) · ctx 45K`. Before a hand-off the front
-  desk says in one line where the work is going and why. `cr agy` prints a line per step
-  while agy works, and anything long runs in the background so you can keep talking. Every
-  reply ends with the route taken and why
-  (`route: agy fast (gemini-3.8-flash-medium): needed reading the code, saver mode`).
+- **In the chat (`UserPromptSubmit` → `PreToolUse` → `cr agy` → `PostToolUse`):**
+  1. **Prompt Intake:** `⇄ reading request ──► [haiku desk] · ⛽ pace saver (...) · ctx 14K · Claude 47% │ Agy Cl 62%·Ge 3% ⚡ shift→Gemini`
+  2. **Route Dispatch (`PreToolUse`):** `╭─ ⇄ [prompt] ──► [haiku desk] ──► [Antigravity: argon-high] (remapped opus→argon-high)`
+  3. **Completion & Opus Savings Box (`cr agy` & `PostToolUse`):**
+     ```text
+     ╭─ ⇄ switchyard flow ─────────────────────────────────────────────────────────
+     │  [prompt] ──► [haiku desk] ──► [Antigravity: opus→argon-high] ──► [✓ 12.4s]
+     │  model:  gemini-4-argon-high (pool shift (Agy Claude 62% vs Gemini 3%) · opus→strong)
+     │  tokens: 38.2K (36.1K in, 2.1K out) · preamble −78% (28 skills pruned)
+     │  saved:  💰 $0.420 saved vs pure Opus ($0.000 actual vs $0.420 Opus · −100%)
+     ╰─────────────────────────────────────────────────────────────────────────────
+     ```
 - **Status line:** your own status line still runs first, and switchyard adds one line below it:
-  `⇄ │ last: scout → haiku · Claude │ ctx 45K │ vs all-Opus −62% ($1.20 at API prices) │ 5h 10% · 7d 89%`
+  `⇄ │ [haiku]──►[agy:argon-high] │ ctx 18K │ vs all-Opus −84% ($4.12 saved) │ C:5h 47%·7d 23% │ Agy:Cl 62%·Ge 3%`
 - **`cr dash`:** a live view to run next to the chat. It shows the cost against an all-Opus
-  session, your plan's 5-hour and 7-day quota, tokens by provider and model, and a feed of
-  requests and the routes they took.
+  session, your plan's 5-hour and 7-day quota (plus pace saver and Antigravity pool-shift status), tokens by provider and model, and a feed of requests and the routes they took.
 
 **"Saved vs all-Opus"** prices every token that was actually processed (front desk,
 subagents, agy) as if Opus had processed it, and compares that with what each model really
 costs. agy work costs nothing on the Claude plan. The prices in `lib/prices.json` are API
-list prices, used only as weights. The figure is conservative because it doesn't credit
-the context that hand-offs kept out of the main conversation, which is usually the bigger
-saving.
+list prices, used only as weights.
 
 ## How it works
 
-Claude Code can't switch the model you chat with on each prompt: no hook or setting allows
-it. Switching would also be slow and expensive, because every switch caches the whole
-conversation again for the new model. So switchyard routes **tasks**, not messages:
-
-1. **A front desk.** `cr` starts `claude` on Sonnet (`CR_FRONT_MODEL` changes that). It
-   answers simple things itself and hands everything else off.
-2. **The front desk decides; nothing guesses for it.** Sonnet reads every request anyway,
-   and it understands requests far better than keyword rules, so it picks the route by what
-   the request *needs*: answerable from the conversation, a small lookup, a lot of reading,
-   a scoped change, a large mechanical change, or deep judgement; scoped changes and deep
-   judgement go to the agy copies of Sonnet and Opus unless they need a browser. A `UserPromptSubmit` hook
-   only adds facts it can't see itself: how full your Claude plan is (and so saver mode), the
-   conversation's size, and which agy models exist today. It costs no extra model call.
-3. **Routes:**
+1. **A thin Haiku front desk (`PreToolUse` enforced).** `cr` starts `claude` on Haiku
+   (`CR_FRONT_MODEL` changes that) with `--autocompact 50k`. A `PreToolUse` hook (`gate.py`)
+   blocks the front desk from editing files or running multi-file reads/searches in the main
+   conversation, guaranteeing that real work is handed off instead of bloating context.
+2. **4-Pool Quota & 7-Day Pace Balancer.** `route.py` and `lib/agy.py` track all 4 pools:
+   Claude 5-hour, Claude 7-day (including projected end-of-week burn pace), Antigravity Claude,
+   and Antigravity Gemini. When Antigravity's Claude pool is hotter than its Gemini pool,
+   `cr agy` automatically remaps `--tier opus` and `--tier sonnet` to Gemini Argon (`strong`) /
+   Flash (`fast`) unless `--force-claude` is passed.
+3. **5-Layer Token Compression (Caveman + Chain-of-Draft + TOON + RTK):**
+   - **Chain-of-Draft (`CoD`):** `<=5 words` per internal reasoning step.
+   - **Telegraphic Wire Protocol (`TOON`):** Compact `GOAL | FILES | CONSTRAINTS | VERIFY` briefs
+     and `STATUS | CHANGED | SUMMARY | VERIFY` return payloads.
+   - **Caveman Preamble Compression:** Compresses `CLAUDE.md` files and prunes unrelated skills
+     before sending context to `cr agy` (~70–85% smaller preamble).
+   - **RTK CLI Output Compression:** Automatically wraps noisy `git`, `pytest`, `cargo`, `go test`,
+     and `npm test` commands in subagents with `rtk` when installed.
+4. **Routes:**
 
    | Route | Model | For |
    |---|---|---|
-   | self | front desk | conversation, short answers |
-   | `switchyard:scout` | Haiku | read-only lookups |
-   | `cr agy --tier sonnet` | Sonnet (agy) | scoped changes (default) |
-   | `cr agy --tier opus` | Opus (agy) | design, hard bugs, security (default) |
+   | self | Haiku front desk | conversation, short answers already in context |
+   | `switchyard:scout` | Haiku | tiny read-only lookups |
+   | `cr agy --tier auto` | Auto (Flash/Argon/Sonnet/Opus) | single-hop triage + pool-balanced execution |
+   | `cr agy --tier sonnet` | Sonnet / Argon / Flash (agy) | scoped changes (default; auto-shifts to Gemini when Agy Claude pool is hot) |
+   | `cr agy --tier opus` | Opus / Argon (agy) | design, hard bugs, security (default; auto-shifts to Argon when Agy Claude pool is hot) |
    | `switchyard:worker` | Sonnet | browser/Claude-only tooling; fallback if agy fails |
    | `switchyard:deep` | Opus | browser/Claude-only tooling; fallback if agy fails |
-   | `cr agy --tier fast` | Gemini Flash | bulk and mechanical work |
-   | `cr agy --tier strong` | Gemini Argon | whole-repo context, second opinions |
-
-4. **Small context.** File reads, searches and test output stay inside the subagent or the
-   agy session. The front desk only sees a short report back, so every following turn
-   costs less. `cr` also sets `--autocompact 160k` (`CR_AUTOCOMPACT`).
-
-5. **Agy first.** Sonnet- and Opus-class work goes to the Antigravity copies by default,
-   saver mode or not. It stays on Claude (worker/deep subagents or the front desk) only when
-   it needs a browser or Claude-only tooling: Claude in Chrome, Google Flow, AI Studio, Meta
-   Business Suite, YouTube Studio, Buffer/TikTok, `podvid live`, computer-use, Claude-only MCP
-   connectors, Agent Teams. If an agy run errors or its quota is exhausted, the front desk
-   falls back to worker (sonnet) or deep (opus) and says so.
-
-6. **Saver mode.** When your Claude plan reaches 80% of its 5-hour or 7-day limit
-   (`CR_SAVER_AT`), even the front desk's own reading and reasoning moves to the Antigravity
-   plan (Flash for reading and mechanical work); it no longer decides where Sonnet/Opus-class
-   work goes. The front desk only answers from what is already in the conversation, and
-   a tiny lookup may still use Haiku. It switches off when the window
-   resets. The usage figures come from Claude Code's status line, so they are as fresh as
-   your last `cr` session. Browser work (Claude in Chrome, Google Flow, AI Studio, Meta
-   Business Suite, YouTube Studio, Buffer/TikTok, `podvid live`) never goes to agy, even in saver mode; agy has no browser. Browser work is blocked at 95% of the plan limit (below that it runs on the cheapest Claude route that can do it).
-
-**No hard-coded model list.** agy tiers are matched by family name (flash, argon, pro, opus,
-sonnet) and compute level against what `agy models` returns for your account. Claude tiers
-use Claude Code's aliases (`haiku`, `sonnet`, `opus`), which always point at the current
-models. New models get picked up without code changes.
-
-## Your config is left alone
-
-Everything is passed as flags for that one session: `--plugin-dir`, `--append-system-prompt-file`,
-`--model`, `--autocompact`. Your global `~/.claude` settings, and any scripts or scheduled jobs
-that run plain `claude`, behave exactly as before. Your own plugins, hooks, skills, MCP servers
-and CLAUDE.md files all still load in a `cr` session.
-
-## Terms of service
-
-switchyard never reads, stores or forwards a Claude or Google credential. It starts the
-unmodified `claude` and `agy` binaries, each signed in by you through its vendor's own
-login, and each request is billed to your own plan. That is the use Anthropic's
-[legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) allows ("an
-end user signing in to the unmodified Claude Code binary with their own Claude subscription").
-Proxies that reuse a subscription login outside the official client are what is not allowed.
-This is our reading of the terms, not legal advice.
-
-## Limits
-
-- `cr usage` shows token counts, not how much of your plan is left. Neither CLI reports that.
-- Routing is the front desk's judgement, so it can misjudge; it escalates a tier when a
-  cheap route's result is wrong, and the route line tells you what it chose.
-- An agy hand-off can't run your Claude Code skills as tools or run your Claude hooks. MCP
-  servers you add to agy (`agy mcp add`) are available to it. See "Project context for agy".
+   | `cr agy --tier fast` | Gemini Flash | bulk reading and mechanical work |
+   | `cr agy --tier strong` | Gemini Argon | whole-repo context, pool balancing, second opinions |
 
 ## Settings
 
 | Variable | Default | |
 |---|---|---|
-| `CR_FRONT_MODEL` | `sonnet` | model you chat with |
+| `CR_FRONT_MODEL` | `haiku` | front-desk dispatcher model |
 | `CR_SAFE` | `0` | `1` turns yolo mode off |
-| `CR_AUTOCOMPACT` | `160k` | auto-compact threshold |
-| `CR_CLEAR_AT` | `120000` | context size (tokens) at which the hook suggests `/clear` |
+| `CR_AUTOCOMPACT` | `50k` | auto-compact threshold |
+| `CR_CLEAR_AT` | `50000` | context size (tokens) at which the hook suggests `/clear` |
 | `CR_SAVER_AT` | `80` | Claude plan usage (%) at which saver mode starts |
-| `CR_NOTICE` | `1` | `0` hides the per-prompt routing notice |
+| `CR_PACE_PROJ_AT` | `105` | projected 7-day usage (%) at which pace saver starts early |
+| `CR_AGY_SHIFT_AT` | `45` | Antigravity Claude pool (%) at which work shifts to Gemini Argon/Flash |
+| `CR_ENFORCE_DISPATCH` | `1` | `0` disables the `PreToolUse` front-desk edit/read gate |
+| `CR_NOTICE` | `1` | `0` hides the per-prompt and tool routing flow notices |
 
 Logs live in `~/.local/state/switchyard/`: `routes.jsonl` and `agy.jsonl`.
 

@@ -96,7 +96,7 @@ def bars(title, rows, value, label):
     top = max(value(r) for r in rows.values()) or 1
     for name, r in sorted(rows.items(), key=lambda kv: -value(kv[1])):
         n = round(WIDTH * value(r) / top)
-        print(f"  {name:<28} {'█' * n}{'░' * (WIDTH - n)} {label(r)}")
+        print(f"  {str(name or 'front-desk'):<28} {'█' * n}{'░' * (WIDTH - n)} {label(r)}")
 
 
 def main(argv=None):
@@ -125,9 +125,24 @@ def main(argv=None):
         print(f"\nSplit  Claude {'█' * n}{'░' * (WIDTH - n)} Antigravity   "
               f"{100 * c / (c + g):.0f}% / {100 * g / (c + g):.0f}%")
 
-    counts = collections.Counter(r["route"] for r in routes)
-    bars("Suggested routes", {k: {"n": v} for k, v in counts.items()}, lambda r: r["n"],
-         lambda r: f"{r['n']} prompts")
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import report
+        rep = report.build(a.days)
+        taken = dict(rep.get("routes", {}).get("taken") or {})
+        self_n = sum(1 for req in (rep.get("requests") or []) if req.get("route") == "self")
+        if self_n:
+            taken["self (front desk)"] = self_n
+        bars("Routes taken", {k: {"n": v} for k, v in taken.items()}, lambda r: r["n"],
+             lambda r: f"{r['n']} runs")
+        tots = rep.get("totals") or {}
+        if tots.get("baseline"):
+            print(f"\nSaved vs pure Opus: ${tots['saved']:.2f} (−{tots['saved_pct']:.1f}%: "
+                  f"${tots['actual']:.2f} actual vs ${tots['baseline']:.2f} all-Opus)")
+    except Exception:
+        counts = collections.Counter((r.get("route") or "front-desk") for r in routes)
+        bars("Routes", {k: {"n": v} for k, v in counts.items()}, lambda r: r["n"],
+             lambda r: f"{r['n']} prompts")
     big = [r["context"] for r in routes if r.get("context")]
     if big:
         print(f"\nContext at each prompt: median {fmt(sorted(big)[len(big) // 2])} tokens, "
