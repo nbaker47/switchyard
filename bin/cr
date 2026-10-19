@@ -45,7 +45,7 @@ done
 [ "${CR_SAFE:-0}" = 1 ] && yolo=0
 
 export CR_FRONT_MODEL="${CR_FRONT_MODEL:-haiku}"
-export CR_AUTOCOMPACT="${CR_AUTOCOMPACT:-100k}"
+export CR_AUTOCOMPACT="${CR_AUTOCOMPACT:-200k}"
 export CR_ROOT="$ROOT" CR_YOLO="$yolo"
 
 flags=(

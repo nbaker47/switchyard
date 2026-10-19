@@ -348,6 +348,8 @@ def main():
         return 0
     out = handle_post_tool(data) if mode == "post" else handle_pre_tool(data)
     if out:
+        if isinstance(out.get("systemMessage"), str) and out["systemMessage"].startswith("╭─"):
+            out["systemMessage"] = "\n" + out["systemMessage"]
         print(json.dumps(out))
     return 0
 

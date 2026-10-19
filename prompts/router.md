@@ -40,14 +40,17 @@ Hand-offs).
 
 Ask, in this order:
 
-1. **Can I answer from what is already in this conversation?** A follow-up, a clarification,
-   an opinion on something already shown. Then answer yourself. Nothing else qualifies, and
-   step 4 overrides this for brainstorming and higher-level thinking.
+1. **Can I answer from what is already in this conversation?** Only a direct follow-up or
+   clarification on an assistant reply **already sent in this chat session** qualifies.
+   Background memory injected at startup (`claude-mem` observations, session notes, `MEMORY.md`,
+   `CLAUDE.md`) does **NOT** qualify—if the user asks "what shall I work on next", "how is X
+   doing", or anything about project status/next steps/priorities, hand it off to `cr agy`!
+   Nothing else qualifies, and step 4 overrides this for brainstorming and higher-level thinking.
 2. **Does it need reading** (files, data, logs, a repo, the web) before it can be answered?
    - A small, specific lookup (where is X, what does this function do) -> scout subagent (Haiku)
      or `cr agy --tier cheap`.
-   - Reading a lot (a whole folder, many files, long logs, data to summarise, "how is X doing")
-     -> `cr agy --tier fast` (Gemini Flash).
+   - Reading a lot (a whole folder, many files, long logs, data to summarise, "how is X doing",
+     "what should I work on next") -> `cr agy --tier fast` (Gemini Flash).
 3. **Does it change things** (code, files, config)?
    - A scoped change with a clear goal (code to spec, running and fixing tests)
      -> `cr agy --tier sonnet` (or `cr agy --tier auto`); the worker subagent (Sonnet) only if

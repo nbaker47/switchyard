@@ -22,32 +22,40 @@ def _fmt_tok(n):
     return str(int(n))
 
 
-def quota_rationale(balance=None):
+def quota_rationale(balance=None, saver=None):
     """Build a concise 1-line summary of why the current subscription/pool state favours this route."""
-    if not balance:
-        return ""
     parts = []
-    pace = balance.get("pace") or {}
-    c_used = balance.get("claude_used")
-    if pace.get("hot"):
+    pace = ((saver or {}).get("pace") if isinstance(saver, dict) else None) or (balance or {}).get("pace") or {}
+    c_used = (saver or {}).get("pct") if isinstance(saver, dict) and saver.get("pct") is not None else (balance or {}).get("claude_used")
+    win_label = (saver or {}).get("window") if isinstance(saver, dict) and saver.get("window") else ("7-day" if pace.get("window") == "seven_day" else "5-hour")
+
+    if isinstance(saver, dict) and saver.get("active"):
+        pace_detail = (
+            f" ({pace['elapsed_pct']:.0f}% elapsed → proj {pace['projected']:.0f}%)"
+            if pace.get("hot") and isinstance(pace.get("projected"), (int, float))
+            else ""
+        )
+        parts.append(f"⛽ saver mode ({win_label} {saver['pct']:.0f}%){pace_detail}")
+    elif pace.get("hot"):
         win = "7d" if pace.get("window") == "seven_day" else "5h"
         parts.append(
             f"Claude {win} {pace['used']:.0f}% ({pace['elapsed_pct']:.0f}% elapsed → proj {pace['projected']:.0f}% saver)"
         )
-    elif balance.get("saver_limit") and isinstance(c_used, (int, float)):
+    elif balance and balance.get("saver_limit") and isinstance(c_used, (int, float)):
         parts.append(f"Claude {c_used:.0f}% (saver ≥80%)")
     elif isinstance(c_used, (int, float)):
         proj = f", proj {pace['projected']:.0f}%" if isinstance(pace.get("projected"), (int, float)) else ""
-        parts.append(f"Claude {c_used:.0f}%{proj}")
+        parts.append(f"Claude {win_label} {c_used:.0f}%{proj}")
 
-    ac, ag = balance.get("agy_claude"), balance.get("agy_gemini")
-    if isinstance(ac, (int, float)) or isinstance(ag, (int, float)):
-        c_str = f"Cl {ac:.0f}%" if isinstance(ac, (int, float)) else ""
-        g_str = f"Ge {ag:.0f}%" if isinstance(ag, (int, float)) else ""
-        pool_txt = "Agy " + " · ".join(x for x in (c_str, g_str) if x)
-        if balance.get("shift_to_gemini"):
-            pool_txt += " (⚡ shift→Gemini)"
-        parts.append(pool_txt)
+    if balance:
+        ac, ag = balance.get("agy_claude"), balance.get("agy_gemini")
+        if isinstance(ac, (int, float)) or isinstance(ag, (int, float)):
+            c_str = f"Cl {ac:.0f}%" if isinstance(ac, (int, float)) else ""
+            g_str = f"Ge {ag:.0f}%" if isinstance(ag, (int, float)) else ""
+            pool_txt = "Agy " + " · ".join(x for x in (c_str, g_str) if x)
+            if balance.get("shift_to_gemini"):
+                pool_txt += " (⚡ shift→Gemini)"
+            parts.append(pool_txt)
     return " │ ".join(parts)
 
 
@@ -73,44 +81,38 @@ def tier_comparison(tier, remapped_from=None, balance=None):
     return f"tier {tier}{pool_cmp}"
 
 
-def intake_Banner(ctx, saver, balance=None, clear_at=50000, standby=None):
-    """Single/multi-line TUI notice for UserPromptSubmit.
-    Preserves exact substrings tested by test_switchyard.py (`⇄ reading request`,
-    `⛽ saver mode (...)`, `ctx NK`, `⚠ large, /clear if unrelated`).
-    """
+def intake_Banner(ctx, saver, balance=None, clear_at=100000, standby=None,
+                  target_model=None, target_tier="fast", reason="", remapped_from=None):
+    """Multi-line dynamic routing box for UserPromptSubmit (`╭─ ⇄ [prompt] ──► ...`)."""
     desk = os.environ.get("CR_FRONT_MODEL", "haiku")
-    parts = [f"⇄ reading request ──► [{desk} desk]"]
-    pace = (saver.get("pace") if isinstance(saver, dict) else None) or (balance or {}).get("pace") or {}
-    if saver.get("active"):
-        pace_tag = (
-            f" [{pace['elapsed_pct']:.0f}% elapsed → proj {pace['projected']:.0f}%]"
-            if pace.get("hot") and isinstance(pace.get("projected"), (int, float))
-            else ""
-        )
-        parts.append(f"⛽ saver mode ({saver['window']} {saver['pct']:.0f}%){pace_tag}")
-    elif pace.get("hot"):
-        parts.append(f"⛽ pace saver ({pace['reason']})")
-    parts.append(f"ctx {ctx // 1000}K" + ("  ⚠ large, /clear if unrelated" if ctx > clear_at else ""))
-
+    full_m = target_model or "gemini-3.8-flash-medium"
+    short_m = short(full_m)
+    remap = f" (remapped {remapped_from}→{short_m})" if remapped_from else ""
+    sb_txt = ""
     if standby:
-        sb_items = [f"♻ {short(s['model'])} (idle {s.get('idle_turns', 0)}/{s.get('max_idle', 3)})"
-                    for s in standby]
-        parts.append("standby: " + ", ".join(sb_items))
+        s0 = standby[0]
+        sb_txt = f" ♻ warm standby #{s0.get('turns', 1)} ({s0['conversation_id'][:8]})"
 
-    if balance:
-        pools = []
-        if isinstance(balance.get("claude_used"), (int, float)):
-            pools.append(f"Claude {balance['claude_used']:.0f}%")
-        ac, ag = balance.get("agy_claude"), balance.get("agy_gemini")
-        if isinstance(ac, (int, float)) or isinstance(ag, (int, float)):
-            c_str = f"Cl {ac:.0f}%" if isinstance(ac, (int, float)) else ""
-            g_str = f"Ge {ag:.0f}%" if isinstance(ag, (int, float)) else ""
-            pools.append("Agy " + "·".join(x for x in (c_str, g_str) if x))
-        if balance.get("shift_to_gemini"):
-            pools.append("⚡ shift→Gemini")
-        if pools:
-            parts.append(" │ ".join(pools))
-    return " · ".join(parts)
+    head = f"⇄ [prompt] ──► [{desk} desk] ──► [Antigravity: {short_m}]{remap}{sb_txt}"
+    cmp_txt = tier_comparison(target_tier or short_m, remapped_from=remapped_from, balance=balance)
+    if reason and not reason.startswith("tier "):
+        why_model = f"{reason} · {cmp_txt}"
+    else:
+        why_model = cmp_txt
+
+    q_txt = quota_rationale(balance=balance, saver=saver)
+    bill_txt = "$0 on Claude plan (billed to Antigravity)"
+    why_quota = f"{q_txt} · {bill_txt}" if q_txt else bill_txt
+
+    ctx_str = f"ctx {ctx // 1000}K" + ("  ⚠ large, /clear if unrelated" if ctx > clear_at else "")
+    tier_str = f" (tier {target_tier})" if target_tier and target_tier != full_m else ""
+    lines = [
+        f"╭─ {head}",
+        f"│  why model: {why_model}",
+        f"│  why quota: {why_quota}",
+        f"╰─ model:     {full_m}{tier_str} · {ctx_str}",
+    ]
+    return "\n".join(lines)
 
 
 def dispatch_banner(target_label, provider, reason="", remapped_from=None, standby_info=None,

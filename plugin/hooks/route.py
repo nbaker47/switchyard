@@ -154,9 +154,19 @@ def facts(transcript_path, saver, tiers, balance=None, standby=None):
     return ctx, "\n".join(lines)
 
 
-def notice(ctx, saver, balance=None, standby=None):
-    """The live intake flow graph line the user sees in the TUI for each prompt."""
-    return flow.intake_Banner(ctx, saver, balance=balance, clear_at=CLEAR_AT, standby=standby)
+def notice(ctx, saver, balance=None, standby=None, prompt=""):
+    """The live intake flow graph box the user sees in the TUI for each prompt."""
+    t_model, t_tier, rem, why = None, "fast", None, ""
+    if prompt:
+        try:
+            models = (CACHE / "agy-models.txt").read_text().split()
+            t_model, t_tier, rem, why = agy.resolve("auto", models, task=prompt)
+        except (OSError, SystemExit):
+            pass
+    return flow.intake_Banner(
+        ctx, saver, balance=balance, clear_at=CLEAR_AT, standby=standby,
+        target_model=t_model, target_tier=t_tier, reason=why, remapped_from=rem,
+    )
 
 
 def _reset_turn_state(session_id, prompt):
@@ -212,7 +222,7 @@ def main():
         pass
     out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}
     if os.environ.get("CR_NOTICE", "1") == "1":
-        out["systemMessage"] = notice(ctx, saver, balance=bal, standby=standby_active)
+        out["systemMessage"] = "\n" + notice(ctx, saver, balance=bal, standby=standby_active, prompt=prompt)
     print(json.dumps(out))
     return 0
 

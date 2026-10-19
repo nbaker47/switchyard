@@ -48,6 +48,7 @@ DEEP_KEYWORDS = {
     "architect", "architecture", "design", "brainstorm", "strategy", "security",
     "race", "deadlock", "concurrency", "root-cause", "root", "stubborn", "complex",
     "plan", "trade-off", "tradeoff", "redesign", "audit",
+    "idea", "ideas", "ideate", "ideation", "concept", "concepts", "pitch", "creative",
 }
 CODE_KEYWORDS = {
     "fix", "bug", "implement", "refactor", "test", "tests", "failing", "edit",
@@ -200,9 +201,9 @@ def classify_task(task):
     """Classify a task brief into ('cheap'|'fast'|'sonnet'|'opus'|'strong', reason) for --tier auto."""
     words = {w for w in re.findall(r"[a-z0-9_-]{3,}", (task or "").lower())}
     if words & DEEP_KEYWORDS:
-        if words & {"brainstorm", "ideate", "strategy", "research", "compare", "repo", "whole"}:
-            return "strong", "auto-triage: open-ended/broad reasoning → strong"
-        return "opus", "auto-triage: deep technical judgement → opus"
+        if words & {"brainstorm", "idea", "ideas", "ideate", "ideation", "concept", "concepts", "pitch", "creative", "strategy", "research", "compare", "repo", "whole"}:
+            return "strong", "open-ended ideation / creative brainstorm"
+        return "opus", "deep technical judgement"
     if words & CODE_KEYWORDS:
         if words & {"bulk", "mechanical", "rename", "all", "format", "migration", "scaffold"}:
             return "fast", "auto-triage: bulk/mechanical code change → fast"
