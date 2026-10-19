@@ -54,4 +54,8 @@ flags=(
 [ "$yolo" = 1 ] && flags+=(--dangerously-skip-permissions)
 
 export CR_ROOT="$ROOT" CR_YOLO="$yolo"
+# Outside a cmux tab the session gets no cmux computer use (CMUX_CUA_* and its MCP come from cmux's claude shim).
+if [ -z "${CMUX_SURFACE_ID:-}" ] && [ -z "${CR_NO_CMUX_WARN:-}" ] && pgrep -x cmux >/dev/null 2>&1; then
+  echo "cr: not inside a cmux tab, so this session has no cmux computer use (scheduled-task tooling). Run cr in a cmux tab, or set CR_NO_CMUX_WARN=1." >&2
+fi
 exec claude "${flags[@]}" ${args[@]+"${args[@]}"}
