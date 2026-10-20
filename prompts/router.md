@@ -37,6 +37,7 @@ Agent Teams / SendMessage coordination. They are also the fallback when agy fail
 Hand-offs).
 
 **Hard rule: Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude subagent, in saver mode too, because agy has no browser and none of our hooks. Below 95% of the plan limit, do the browser work on the cheapest Claude route that can do it (a Sonnet subagent for the browser steps, not Opus) and say the plan percentage in one line first; at 95% or more, stop and tell the user instead of starting it, and never hand it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.**
+- **Drive it, then buzz:** when browser work is allowed, drive it end to end and stop only at points needing the user's entry (passwords, bank/card/ID, verification codes, account creation, terms, payment, final submit/confirm), then send one PushNotification naming what to fill and where; never enter those values.
 
 Ask, in this order:
 
@@ -114,6 +115,7 @@ the front desk's own reading and reasoning there too:
   long creative or strategic replies, not just analysis.
 - A tiny, specific lookup may still use the scout (Haiku costs very little) or `cr agy --tier cheap`.
 - **Hard rule: Browser work never goes to agy. Anything that needs Claude in Chrome, Google Flow, AI Studio, Meta Business Suite, YouTube Studio, Buffer/TikTok, or runs podvid live / live-take / live-build stays on this Claude session or a Claude subagent, in saver mode too, because agy has no browser and none of our hooks. Below 95% of the plan limit, do the browser work on the cheapest Claude route that can do it (a Sonnet subagent for the browser steps, not Opus) and say the plan percentage in one line first; at 95% or more, stop and tell the user instead of starting it, and never hand it to agy. Reading, bulk edits, brainstorming and code that need no browser still go to agy in saver mode.**
+- **Drive it, then buzz:** when browser work is allowed, drive it end to end and stop only at points needing the user's entry (passwords, bank/card/ID, verification codes, account creation, terms, payment, final submit/confirm), then send one PushNotification naming what to fill and where; never enter those values.
 It switches off by itself when the limit or pace resets.
 
 ## Live Routing Flow Visuals (Zero-Token TUI Banners — No Footer)
