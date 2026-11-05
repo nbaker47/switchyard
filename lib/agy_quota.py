@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -19,7 +20,12 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "switchyard" / "agy-quota.json"
-TOKENS = Path.home() / "Library/Application Support/antigravity-usage/accounts"
+# antigravity-usage keeps its accounts in the platform's config folder: Application Support on macOS, XDG elsewhere
+TOKENS = (
+    Path.home() / "Library/Application Support/antigravity-usage/accounts"
+    if sys.platform == "darwin"
+    else Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "antigravity-usage" / "accounts"
+)
 DAILY = "https://daily-cloudcode-pa.googleapis.com"
 META = {"ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI"}
 TTL = 60
